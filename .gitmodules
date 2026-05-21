@@ -1,0 +1,12 @@
+[submodule "pomaidb"]
+	path = pomaidb
+	url = https://github.com/pomagrenate/pomaidb.git
+[submodule "cheesebrain"]
+	path = cheesebrain
+	url = https://github.com/pomagrenate/cheesebrain.git
+[submodule "pomaicache"]
+	path = pomaicache
+	url = https://github.com/pomagrenate/pomaicache.git
+[submodule "cheesepath"]
+	path = cheesepath
+	url = https://github.com/pomagrenate/cheesepath.git
