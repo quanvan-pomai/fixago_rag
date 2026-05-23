@@ -71,3 +71,7 @@ data/
 models/
 __pycache__/
 *.pyc
+
+# Environment and secrets
+.env
+venv/

@@ -3,6 +3,9 @@ import sys
 import ctypes
 import shutil
 import requests
+import threading
+
+rag_lock = threading.Lock()
 
 # Setup import paths for pomaidb and pomaicache
 workspace_dir = os.path.dirname(os.path.abspath(__file__))
@@ -57,27 +60,29 @@ pomaidb._check(
 print("RAG pipeline initialized.")
 
 def ingest_document(doc_id, text):
-    text_buf = text.encode("utf-8")
-    pomaidb._check(
-        pomaidb._lib.pomai_rag_ingest_document(
-            pipeline, int(doc_id), text_buf, len(text_buf)
+    with rag_lock:
+        text_buf = text.encode("utf-8")
+        pomaidb._check(
+            pomaidb._lib.pomai_rag_ingest_document(
+                pipeline, int(doc_id), text_buf, len(text_buf)
+            )
         )
-    )
-    pomaidb.freeze(db)
+        pomaidb.freeze(db)
 
 def retrieve_context(query, top_k=5):
-    query_buf = query.encode("utf-8")
-    max_len = 65536
-    out_buf = ctypes.create_string_buffer(max_len)
-    out_len = ctypes.c_size_t()
-    pomaidb._check(
-        pomaidb._lib.pomai_rag_retrieve_context_buf(
-            pipeline, query_buf, len(query_buf), top_k, out_buf, max_len, ctypes.byref(out_len)
+    with rag_lock:
+        query_buf = query.encode("utf-8")
+        max_len = 65536
+        out_buf = ctypes.create_string_buffer(max_len)
+        out_len = ctypes.c_size_t()
+        pomaidb._check(
+            pomaidb._lib.pomai_rag_retrieve_context_buf(
+                pipeline, query_buf, len(query_buf), top_k, out_buf, max_len, ctypes.byref(out_len)
+            )
         )
-    )
-    if out_len.value == 0:
-        return ""
-    return out_buf.value[:out_len.value].decode("utf-8", errors="replace")
+        if out_len.value == 0:
+            return ""
+        return out_buf.value[:out_len.value].decode("utf-8", errors="replace")
 
 def normalize_query(query):
     query_lower = query.lower()
