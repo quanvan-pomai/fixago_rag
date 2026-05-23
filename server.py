@@ -156,7 +156,7 @@ def query_rag():
         llm_response = requests.post(
             "http://127.0.0.1:8080/v1/chat/completions",
             json={"messages": messages, "temperature": 0.0},
-            timeout=120
+            timeout=300
         )
         if llm_response.status_code != 200:
             return jsonify({"status": "error", "message": f"LLM server returned status {llm_response.status_code}"}), 500
@@ -191,7 +191,7 @@ def query_rag():
             llm_response2 = requests.post(
                 "http://127.0.0.1:8080/v1/chat/completions",
                 json={"messages": messages, "temperature": 0.2},
-                timeout=120
+                timeout=300
             )
             answer = llm_response2.json()["choices"][0]["message"]["content"]
             
