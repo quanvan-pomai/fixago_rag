@@ -61,7 +61,7 @@ pomaicache: submodule-check
 	mkdir -p pomaicache/build
 	cmake -S pomaicache -B pomaicache/build \
 		-DCMAKE_BUILD_TYPE=Release \
-		-DBUILD_PYTHON_BINDINGS=OFF
+		-DBUILD_PYTHON_BINDINGS=ON
 	cmake --build pomaicache/build -j$(NPROC)
 
 # 4. cheesepath
