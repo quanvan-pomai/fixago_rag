@@ -179,10 +179,48 @@ def query_rag():
         
         result_json = llm_response.json()
         answer = result_json["choices"][0]["message"]["content"]
-        
+
         used_tools = []
-        
+
         import re
+
+        # ── Smart booking detection for small models (0.5B) ──────────────────
+        # Small models often output a structured Name/Phone/Address summary
+        # instead of a CALL_TOOL line. Detect this and inject the tool call
+        # server-side when the user has confirmed.
+        if "CALL_TOOL" not in answer:
+            n_m = re.search(r'(?:Name|Tên)\s*:\s*(.+)', answer)
+            p_m = re.search(r'(?:Phone|SĐT|Sđt|Điện thoại)\s*:\s*(.+)', answer)
+            a_m = re.search(r'(?:Address|Địa chỉ)\s*:\s*(.+)', answer)
+            d_m = re.search(r'(?:Issue|Vấn đề|Lỗi)\s*:\s*(.+)', answer)
+
+            # Also search history for a previous summary
+            if not (n_m and p_m and a_m):
+                for msg in reversed(history):
+                    if msg.get('role') == 'assistant':
+                        t = msg.get('content', '')
+                        n_m = n_m or re.search(r'(?:Name|Tên)\s*:\s*(.+)', t)
+                        p_m = p_m or re.search(r'(?:Phone|SĐT|Sđt|Điện thoại)\s*:\s*(.+)', t)
+                        a_m = a_m or re.search(r'(?:Address|Địa chỉ)\s*:\s*(.+)', t)
+                        d_m = d_m or re.search(r'(?:Issue|Vấn đề|Lỗi)\s*:\s*(.+)', t)
+                        if n_m and p_m and a_m:
+                            break
+
+            if n_m and p_m and a_m:
+                confirm_words = ['xác nhận', 'đồng ý', 'có', 'ok', 'được', 'book đi', 'đặt đi', 'đặt lịch']
+                user_confirmed = any(w in query.lower() for w in confirm_words)
+                # One-shot: user provided all info AND asked to book in same message
+                one_shot = any(w in query.lower() for w in ['đặt lịch', 'book', 'đặt thợ', 'đặt giúp']) \
+                           and n_m and p_m and a_m
+                if user_confirmed or one_shot:
+                    e_name = n_m.group(1).strip()
+                    e_phone = p_m.group(1).strip()
+                    e_addr = a_m.group(1).strip()
+                    e_desc = d_m.group(1).strip() if d_m else query
+                    answer = (f'CALL_TOOL: create_booking('
+                              f'name="{e_name}", phone="{e_phone}", '
+                              f'address="{e_addr}", description="{e_desc}")')
+        # ─────────────────────────────────────────────────────────────────────
         if "CALL_TOOL: get_groups" in answer:
             print("AGENT CALLED TOOL:", answer)
             used_tools.append('Thực thi Tool [Backend API]: Lấy danh sách các nhóm dịch vụ (GET /services/groups)...')
@@ -310,28 +348,27 @@ def query_rag():
                 
                 resp = requests.post(f"{backend_url}/bookings", json=booking_payload, timeout=5)
                 if resp.status_code in [200, 201]:
-                    data = resp.json()
-                    booking_code = data.get("bookingCode", "KHÔNG-RÕ-MÃ")
-                    api_context += f"Tạo thành công Booking! Mã đơn: {booking_code}. Thông báo cho khách biết đã đặt lịch thành công."
+                    bdata = resp.json()
+                    booking_code = bdata.get("bookingCode", "N/A")
+                    api_context += f"OK:{booking_code}"
                 else:
-                    api_context += f"Lỗi tạo Booking: {resp.text}"
+                    api_context += f"ERR:{resp.text[:100]}"
             except Exception as e:
-                api_context += f"Lỗi gọi Backend API: {e}"
-                
-            second_prompt = (
-                f"{api_context}\n\nHãy tổng hợp kết quả này để thông báo cho người dùng một cách vui vẻ và chuyên nghiệp. "
-                "Báo cho khách hàng biết hệ thống đã ghi nhận tình trạng và thợ sửa chữa của Fixago sẽ liên hệ lại ngay lập tức!"
-            )
-            messages.append({"role": "assistant", "content": answer})
-            messages.append({"role": "user", "content": second_prompt})
-            
-            # Second call
-            llm_response2 = requests.post(
-                "http://127.0.0.1:8080/v1/chat/completions",
-                json={"messages": messages, "temperature": 0.2},
-                timeout=120
-            )
-            answer = llm_response2.json()["choices"][0]["message"]["content"]
+                api_context += f"ERR:{e}"
+
+            # Build deterministic confirmation — no 2nd LLM call (unreliable on 0.5B)
+            if api_context.startswith("[KẾT QUẢ TỪ TOOL CREATE_BOOKING]:\nOK:"):
+                booking_code = api_context.split("OK:", 1)[1].strip()
+                answer = (
+                    f"Đặt lịch thành công! "
+                    f"Mã đơn: {booking_code}. "
+                    f"Khách hàng: {name} | SĐT: {phone} | Địa chỉ: {address}. "
+                    f"Vấn đề: {desc}. "
+                    f"Thợ Fixago sẽ liên hệ sớm."
+                )
+            else:
+                err = api_context.split("ERR:", 1)[1].strip() if "ERR:" in api_context else api_context
+                answer = f"Xin lỗi, không thể tạo đơn lúc này. Lỗi: {err}"
         
 
 
