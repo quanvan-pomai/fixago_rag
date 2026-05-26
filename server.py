@@ -84,6 +84,8 @@ def query_rag():
         "A: CALL_TOOL: get_groups()\n\n"
         "Q: Sửa ống nước giá bao nhiêu?\n"
         "A: CALL_TOOL: get_services(search=\"nước\")\n\n"
+        "Q: Có khuyến mãi hay giảm giá gì không?\n"
+        "A: CALL_TOOL: get_promotions()\n\n"
         "Q: Sửa chập điện bao nhiêu tiền?\n"
         "A: CALL_TOOL: get_services(search=\"điện\")\n\n"
         "Q: (User confirmed booking, has name/phone/address)\n"
@@ -274,6 +276,45 @@ def query_rag():
             messages.append({"role": "user", "content": second_prompt})
             
             # Second call
+            llm_response2 = requests.post(
+                "http://127.0.0.1:8080/v1/chat/completions",
+                json={"messages": messages, "temperature": 0.2},
+                timeout=120
+            )
+            answer = llm_response2.json()["choices"][0]["message"]["content"]
+            
+        elif "CALL_TOOL: get_promotions" in answer:
+            print("AGENT CALLED TOOL:", answer)
+            used_tools.append('Thực thi Tool [Backend API]: Lấy danh sách ưu đãi (GET /discounts/available)...')
+            
+            api_context = "[KẾT QUẢ TỪ TOOL GET_PROMOTIONS]:\n"
+            try:
+                backend_url = os.environ.get("BACKEND_API_URL", "http://127.0.0.1:3001/api/v1")
+                resp = requests.get(f"{backend_url}/discounts/available", timeout=3)
+                if resp.status_code == 200:
+                    promos = resp.json().get("data", [])
+                    if promos:
+                        for p in promos:
+                            api_context += f"- Khuyến mãi '{p.get('name', 'Giảm giá')}': "
+                            if p.get('code'):
+                                api_context += f"Mã {p['code']}, "
+                            if p.get('discountType') == 1:
+                                api_context += f"giảm {p.get('discountValue', 0)}%"
+                                if p.get('maxDiscountAmount'):
+                                    api_context += f" (tối đa {p['maxDiscountAmount']} VNĐ)"
+                            else:
+                                api_context += f"giảm {p.get('discountValue', 0)} VNĐ"
+                            api_context += ".\n"
+                    else:
+                        api_context += "Hiện tại chưa có chương trình khuyến mãi nào."
+                else:
+                    api_context += "Hiện tại không lấy được thông tin khuyến mãi."
+            except Exception as e:
+                api_context += f"Lỗi gọi Backend API: {e}"
+                
+            messages.append({"role": "assistant", "content": answer})
+            messages.append({"role": "user", "content": f"{api_context}\n\nHãy thông báo kết quả này cho người dùng một cách hấp dẫn và chân thành."})
+            
             llm_response2 = requests.post(
                 "http://127.0.0.1:8080/v1/chat/completions",
                 json={"messages": messages, "temperature": 0.2},
