@@ -239,7 +239,10 @@
             <h1>Fixago AI</h1>
             <p>RAG + Live API + Prompt Guard</p>
         </div>
-        <div class="badge">Production Demo</div>
+        <div style="display: flex; gap: 10px; align-items: center;">
+            <button onclick="resetSession()" style="width: auto; height: 30px; border-radius: 8px; font-size: 12px; padding: 0 12px; font-weight: 500; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2);">Reset Chat</button>
+            <div class="badge">Production Demo</div>
+        </div>
     </div>
     
     <div class="chat-container" id="chat">
@@ -268,13 +271,40 @@
         const input = document.getElementById('query');
         const sendBtn = document.getElementById('sendBtn');
 
+        function getChatSessionId() {
+            let sessionId = sessionStorage.getItem('fixago_chat_session');
+            if (!sessionId) {
+                sessionId = crypto.randomUUID(); 
+                sessionStorage.setItem('fixago_chat_session', sessionId);
+            }
+            return sessionId;
+        }
+
+        function resetSession() {
+            sessionStorage.removeItem('fixago_chat_session');
+            chat.innerHTML = `
+                <div class="typing-wrapper" id="typing">
+                    <div class="typing">
+                        <div class="dot"></div><div class="dot"></div><div class="dot"></div>
+                    </div>
+                    <div class="typing-text">AI đang tổng hợp dữ liệu...</div>
+                </div>
+            `;
+            // Re-fetch initial message to trigger a new session
+            window.onload();
+        }
+
         window.onload = async function() {
+            const typing = document.getElementById('typing'); // refresh reference if DOM changed
             typing.style.display = 'flex';
             try {
                 const res = await fetch('/api/v1/rag/query', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ query: "Xin chào, hãy giới thiệu ngắn gọn bạn là ai và bạn có thể làm gì bằng tiếng Việt." })
+                    body: JSON.stringify({ 
+                        query: "Xin chào, hãy giới thiệu ngắn gọn bạn là ai và bạn có thể làm gì bằng tiếng Việt.",
+                        session_id: getChatSessionId() 
+                    })
                 });
                 const data = await res.json();
                 typing.style.display = 'none';
@@ -331,7 +361,10 @@
                 const res = await fetch('/api/v1/rag/query', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ query: text })
+                    body: JSON.stringify({ 
+                        query: text,
+                        session_id: getChatSessionId()
+                    })
                 });
                 const data = await res.json();
                 
