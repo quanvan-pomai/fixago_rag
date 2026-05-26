@@ -243,9 +243,7 @@
     </div>
     
     <div class="chat-container" id="chat">
-        <div class="message bot">Xin chào Sếp! Em là AI Assistant của Fixago. Em đã được tích hợp <strong>kiến trúc RAG</strong> mới nhất, chống Hacker (Prompt Injection) và lấy giá trực tiếp từ Backend theo thời gian thực.
-        
-Sếp có muốn thử hỏi giá dịch vụ sửa ống nước, sửa điện hay thử làm Hacker xem sao không ạ? 😎</div>
+
         
         <div class="typing-wrapper" id="typing">
             <div class="typing">
@@ -269,6 +267,25 @@ Sếp có muốn thử hỏi giá dịch vụ sửa ống nước, sửa điện
         const typing = document.getElementById('typing');
         const input = document.getElementById('query');
         const sendBtn = document.getElementById('sendBtn');
+
+        window.onload = async function() {
+            typing.style.display = 'flex';
+            try {
+                const res = await fetch('/api/v1/rag/query', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: "Xin chào, hãy giới thiệu ngắn gọn bạn là ai và bạn có thể làm gì bằng tiếng Việt." })
+                });
+                const data = await res.json();
+                typing.style.display = 'none';
+                if (data.status === 'success') {
+                    appendMsg(data.response, 'bot');
+                }
+            } catch (err) {
+                typing.style.display = 'none';
+                appendMsg("Xin chào! Tôi là trợ lý ảo AI của Fixago. Bạn cần tôi giúp gì?", 'bot');
+            }
+        };
 
         function autoResize(textarea) {
             textarea.style.height = 'auto';
