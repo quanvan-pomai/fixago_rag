@@ -11,6 +11,11 @@ import uuid
 from flask import Flask, request, jsonify, send_file
 
 import rag_engine
+from tools_schema import FIXAGO_TOOLS
+
+# Feature flag: set ENABLE_NATIVE_TOOL_CALL=1 to use OpenAI-style function calling
+# Requires cheese-server started with --jinja flag
+ENABLE_NATIVE_TOOL_CALL = os.environ.get("ENABLE_NATIVE_TOOL_CALL", "0") in ("1", "true", "yes")
 
 class SessionManager:
     @staticmethod
@@ -111,6 +116,13 @@ def history_to_text(history):
 
 
 def build_safe_system(system_prompt):
+    if ENABLE_NATIVE_TOOL_CALL:
+        # Native tool calling: minimal system prompt, no need to teach format
+        # Model gets tool schema from the API payload directly
+        return system_prompt
+
+    # Legacy text mode: inject compact few-shot examples to teach CALL_TOOL format
+    # Keep examples minimal — small models get confused with too many
     return system_prompt + (
         "\n\nEXAMPLES:\n"
         "Q: Fixago có dịch vụ gì?\n"
@@ -124,7 +136,7 @@ def build_safe_system(system_prompt):
         "Q: Tôi muốn đặt thợ sửa điện\n"
         "A: Dạ mình hỗ trợ bạn đặt lịch sửa điện được ạ. Bạn cho mình xin họ tên, số điện thoại và địa chỉ cần sửa nhé.\n\n"
         "Q: Tên Nam, 0909123456, 12 Nguyễn Trãi Q1\n"
-        "A: Tên: Nam\nSĐT: 0909123456\nĐịa chỉ: 12 Nguyễn Trãi Q1\nVấn đề: sửa điện\nMình xác nhận đặt lịch với thông tin này nhé?\n\n"
+        "A: Tên: Nam\nSĐT: 0909123456\nĐịa chỉ: 12 Nguyễn Trãi Q1\nVấn đề: sửa điện\nBạn xác nhận đặt lịch với thông tin này nhé?\n\n"
         "Q: ok đặt đi\n"
         "A: CALL_TOOL: create_booking(name=\"Nam\", phone=\"0909123456\", address=\"12 Nguyễn Trãi Q1\", description=\"sửa điện\")\n"
     )
@@ -272,7 +284,14 @@ def merge_booking_info(query, history):
 
 
 def maybe_build_booking_response(query, history):
-    if not detect_booking_intent(query) and not detect_confirmation(query):
+    has_intent = detect_booking_intent(query) or detect_confirmation(query)
+    if not has_intent:
+        for turn in reversed(history[-4:]): # check recent history
+            if turn.get("role") == "user" and detect_booking_intent(turn.get("content", "")):
+                has_intent = True
+                break
+    
+    if not has_intent:
         return None
 
     info = merge_booking_info(query, history)
@@ -384,13 +403,17 @@ def normalize_service_search(raw_search):
     return raw_search.strip()
 
 
-def llm_chat(messages, temperature=0.0, timeout=300):
+def llm_chat(messages, temperature=0.0, timeout=300, grammar=None):
+    payload = {
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if grammar:
+        payload["grammar"] = grammar
+
     response = requests.post(
         "http://127.0.0.1:8080/v1/chat/completions",
-        json={
-            "messages": messages,
-            "temperature": temperature
-        },
+        json=payload,
         timeout=timeout
     )
 
@@ -399,6 +422,59 @@ def llm_chat(messages, temperature=0.0, timeout=300):
 
     result_json = response.json()
     return result_json["choices"][0]["message"]["content"]
+
+
+def load_grammar(grammar_file: str) -> str:
+    """Load a GBNF grammar file, return empty string on failure."""
+    try:
+        grammar_path = os.path.join(os.path.dirname(__file__), "grammars", grammar_file)
+        with open(grammar_path, "r", encoding="utf-8") as f:
+            # Strip comment lines for cleaner payload
+            lines = [l for l in f.readlines() if not l.strip().startswith("#")]
+            return "".join(lines).strip()
+    except Exception:
+        return ""
+
+
+def llm_chat_with_tools(messages, temperature=0.0, timeout=300):
+    """
+    Native OpenAI-style function calling — requires cheese-server --jinja.
+    Returns (tool_name, tool_args_dict) if model called a tool,
+    or (None, text_response) if model replied normally.
+    """
+    payload = {
+        "messages": messages,
+        "temperature": temperature,
+        "tools": FIXAGO_TOOLS,
+        "tool_choice": "auto",
+    }
+
+    response = requests.post(
+        "http://127.0.0.1:8080/v1/chat/completions",
+        json=payload,
+        timeout=timeout
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(f"LLM server returned status {response.status_code}: {response.text[:200]}")
+
+    result_json = response.json()
+    choice = result_json["choices"][0]
+    message = choice["message"]
+
+    # Model decided to call a tool
+    tool_calls = message.get("tool_calls")
+    if tool_calls:
+        tc = tool_calls[0]  # take first tool call
+        func_name = tc["function"]["name"]
+        try:
+            func_args = json.loads(tc["function"]["arguments"])
+        except Exception:
+            func_args = {}
+        return func_name, func_args, message
+
+    # Model replied with text
+    return None, message.get("content", ""), message
 
 
 def run_second_llm(messages, api_context, instruction, timeout=120):
@@ -511,7 +587,9 @@ def handle_get_promotions(messages, used_tools):
         resp = requests.get(f"{backend_url}/discounts/available", timeout=3)
 
         if resp.status_code == 200:
-            promos = resp.json().get("data", [])
+            # Backend returns a plain array (no { data: [] } wrapper)
+            raw = resp.json()
+            promos = raw if isinstance(raw, list) else raw.get("data", [])
             if promos:
                 for p in promos:
                     name = p.get("name", "Giảm giá")
@@ -539,14 +617,47 @@ def handle_get_promotions(messages, used_tools):
     return run_second_llm(messages, api_context, instruction)
 
 
-def choose_service_id(description):
-    q = normalize_text(description)
+def resolve_service_id(description):
+    """
+    Fetch a real serviceId from the backend that matches the booking description.
+    Backend requires at least one detail in POST /bookings — never return None.
+    Strategy:
+      1. Search by description keyword (normalized group key)
+      2. If no match, fall back to first active service in the system
+    Returns (serviceId, serviceGroupId).
+    Raises RuntimeError if backend is completely unreachable.
+    """
+    backend_url = os.environ.get("BACKEND_API_URL", "http://127.0.0.1:3001/api/v1")
+    search_key = normalize_service_search(description)
 
-    if any(k in q for k in ["nước", "ống", "bơm", "van", "bồn", "vòi", "nghẹt", "rò"]):
-        return 2
-    if any(k in q for k in ["cải tạo", "sơn", "tường", "chống thấm", "ốp lát", "xây"]):
-        return 3
-    return 1
+    try:
+        # Step 1: search by keyword
+        resp = requests.get(
+            f"{backend_url}/services",
+            params={"search": search_key, "limit": 1, "isActive": True},
+            timeout=3
+        )
+        if resp.status_code == 200:
+            data = resp.json().get("data", [])
+            if data:
+                return data[0].get("id"), data[0].get("serviceGroupId")
+
+        # Step 2: fallback — any active service
+        resp2 = requests.get(
+            f"{backend_url}/services",
+            params={"limit": 1, "isActive": True},
+            timeout=3
+        )
+        if resp2.status_code == 200:
+            data2 = resp2.json().get("data", [])
+            if data2:
+                print(f"resolve_service_id: no match for '{search_key}', using fallback service id={data2[0].get('id')}")
+                return data2[0].get("id"), data2[0].get("serviceGroupId")
+
+    except Exception as e:
+        print(f"resolve_service_id failed: {e}")
+
+    raise RuntimeError("Không thể lấy thông tin dịch vụ từ hệ thống để tạo đơn.")
 
 
 def handle_create_booking(answer, used_tools):
@@ -569,8 +680,9 @@ def handle_create_booking(answer, used_tools):
 
     try:
         backend_url = os.environ.get("BACKEND_API_URL", "http://127.0.0.1:3001/api/v1")
-        service_id = choose_service_id(desc)
 
+        # Resolve a real serviceId — backend requires at least 1 detail
+        service_id, _ = resolve_service_id(desc)
         booking_payload = {
             "guestPhone": phone,
             "contactName": name,
@@ -580,12 +692,7 @@ def handle_create_booking(answer, used_tools):
             },
             "priority": 0,
             "customerNote": desc,
-            "details": [
-                {
-                    "serviceId": service_id,
-                    "quantity": 1
-                }
-            ]
+            "details": [{"serviceId": service_id, "quantity": 1}]
         }
 
         resp = requests.post(f"{backend_url}/bookings", json=booking_payload, timeout=5)
@@ -772,32 +879,94 @@ def query_rag():
 
         used_tools = []
 
-        booking_response = maybe_build_booking_response(query, history)
-        forced_tool = detect_tool_intent(query)
+        if ENABLE_NATIVE_TOOL_CALL:
+            # ── Native function calling path (cheese-server --jinja) ──────────
+            # Rule-based pre-empt for booking confirmation (stateful, needs context)
+            booking_response = maybe_build_booking_response(query, history)
+            if booking_response and "CALL_TOOL: create_booking" in booking_response:
+                # Already have all info + confirmation → bypass LLM, call directly
+                answer = handle_create_booking(booking_response, used_tools)
+            elif booking_response and "CALL_TOOL" not in booking_response:
+                # Collecting info / asking missing fields — use text response directly
+                answer = booking_response
+            else:
+                # Let the model decide which tool to call (or reply normally)
+                tool_name, tool_result, raw_message = llm_chat_with_tools(
+                    messages, temperature=0.0, timeout=300
+                )
 
-        if booking_response:
-            answer = booking_response
-        elif forced_tool:
-            answer = forced_tool
+                if tool_name == "get_groups":
+                    messages.append({"role": "assistant", "content": None, "tool_calls": raw_message.get("tool_calls")})
+                    answer = handle_get_groups(messages, used_tools)
+
+                elif tool_name == "get_services":
+                    search = tool_result.get("search", "")
+                    # Inject the parsed search arg into a fake CALL_TOOL string
+                    # so handle_get_services can parse it (reuse existing handler)
+                    fake_answer = f'CALL_TOOL: get_services(search="{search}")'
+                    messages.append({"role": "assistant", "content": None, "tool_calls": raw_message.get("tool_calls")})
+                    answer = handle_get_services(fake_answer, messages, used_tools)
+
+                elif tool_name == "get_promotions":
+                    messages.append({"role": "assistant", "content": None, "tool_calls": raw_message.get("tool_calls")})
+                    answer = handle_get_promotions(messages, used_tools)
+
+                elif tool_name == "create_booking":
+                    # Double-check confirmation before booking
+                    if detect_confirmation(query):
+                        name = tool_result.get("name", "")
+                        phone = tool_result.get("phone", "")
+                        address = tool_result.get("address", "")
+                        description = tool_result.get("description", "")
+                        fake_answer = f'CALL_TOOL: create_booking(name="{name}", phone="{phone}", address="{address}", description="{description}")'
+                        answer = handle_create_booking(fake_answer, used_tools)
+                    else:
+                        # Model wanted to book but no confirmation — show summary
+                        info = merge_booking_info(query, history)
+                        info.update({k: v for k, v in tool_result.items() if v})
+                        answer = (
+                            f"Tên: {info.get('name') or tool_result.get('name', '?')}\n"
+                            f"SĐT: {info.get('phone') or tool_result.get('phone', '?')}\n"
+                            f"Địa chỉ: {info.get('address') or tool_result.get('address', '?')}\n"
+                            f"Vấn đề: {info.get('issue') or tool_result.get('description', '?')}\n"
+                            "Bạn xác nhận đặt lịch với thông tin này nhé?"
+                        )
+
+                else:
+                    # Model replied with text (no tool call)
+                    answer = tool_result
+
         else:
-            answer = llm_chat(messages, temperature=0.0, timeout=300)
+            # ── Legacy text-based tool detection path (no --jinja needed) ─────
+            booking_response = maybe_build_booking_response(query, history)
+            forced_tool = detect_tool_intent(query)
 
-        answer = repair_booking_tool_call_if_needed(answer, query, history)
+            if booking_response:
+                answer = booking_response
+            elif forced_tool:
+                answer = forced_tool
+            else:
+                # Use GBNF grammar to constrain output to either tool call or text
+                # This prevents model from hallucinating tool call format
+                grammar = load_grammar("fixago_tool_call.gbnf") if not ENABLE_NATIVE_TOOL_CALL else ""
+                answer = llm_chat(messages, temperature=0.0, timeout=300, grammar=grammar)
 
-        if "CALL_TOOL: get_groups" in answer:
-            messages.append({"role": "assistant", "content": answer})
-            answer = handle_get_groups(messages, used_tools)
+            answer = repair_booking_tool_call_if_needed(answer, query, history)
 
-        elif "CALL_TOOL: get_services" in answer:
-            messages.append({"role": "assistant", "content": answer})
-            answer = handle_get_services(answer, messages, used_tools)
+            if "CALL_TOOL: get_groups" in answer:
+                messages.append({"role": "assistant", "content": answer})
+                answer = handle_get_groups(messages, used_tools)
 
-        elif "CALL_TOOL: get_promotions" in answer:
-            messages.append({"role": "assistant", "content": answer})
-            answer = handle_get_promotions(messages, used_tools)
+            elif "CALL_TOOL: get_services" in answer:
+                messages.append({"role": "assistant", "content": answer})
+                answer = handle_get_services(answer, messages, used_tools)
 
-        elif "create_booking" in answer.lower():
-            answer = handle_create_booking(answer, used_tools)
+            elif "CALL_TOOL: get_promotions" in answer:
+                messages.append({"role": "assistant", "content": answer})
+                answer = handle_get_promotions(messages, used_tools)
+
+            elif "create_booking" in answer.lower():
+                answer = handle_create_booking(answer, used_tools)
 
         session_data["history"].append({"role": "user", "content": query})
         session_data["history"].append({"role": "assistant", "content": answer})
