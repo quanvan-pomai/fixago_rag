@@ -76,7 +76,7 @@ def is_prompt_injection(query):
 def guardrail_response():
     return {
         "status": "success",
-        "response": "Em không thể hỗ trợ phần đó, nhưng em có thể tư vấn dịch vụ sửa chữa hoặc hỗ trợ mình đặt lịch với Fixago ạ.",
+        "response": "Mình không thể hỗ trợ phần đó, nhưng mình có thể tư vấn dịch vụ sửa chữa hoặc hỗ trợ bạn đặt lịch với Fixago ạ.",
         "source": "guardrail",
         "tool_calls": [],
         "cache_metrics": {
@@ -122,7 +122,7 @@ def build_safe_system(system_prompt):
         "Q: Sửa chập điện bao nhiêu tiền?\n"
         "A: CALL_TOOL: get_services(search=\"điện\")\n\n"
         "Q: Tôi muốn đặt thợ sửa điện\n"
-        "A: Dạ em hỗ trợ mình đặt lịch sửa điện được ạ. Mình cho em xin họ tên, số điện thoại và địa chỉ cần sửa nhé.\n\n"
+        "A: Dạ mình hỗ trợ bạn đặt lịch sửa điện được ạ. Bạn cho mình xin họ tên, số điện thoại và địa chỉ cần sửa nhé.\n\n"
         "Q: Tên Nam, 0909123456, 12 Nguyễn Trãi Q1\n"
         "A: Tên: Nam\nSĐT: 0909123456\nĐịa chỉ: 12 Nguyễn Trãi Q1\nVấn đề: sửa điện\nMình xác nhận đặt lịch với thông tin này nhé?\n\n"
         "Q: ok đặt đi\n"
@@ -287,8 +287,8 @@ def maybe_build_booking_response(query, history):
 
     if missing:
         if len(missing) == 3:
-            return "Dạ em hỗ trợ mình đặt lịch được ạ. Mình cho Fixago xin họ tên, số điện thoại và địa chỉ cần sửa nhé."
-        return "Dạ em hỗ trợ mình đặt lịch được ạ. Mình cho em xin thêm " + ", ".join(missing) + " nhé."
+            return "Dạ mình hỗ trợ bạn đặt lịch được ạ. Bạn cho Fixago xin họ tên, số điện thoại và địa chỉ cần sửa nhé."
+        return "Dạ mình hỗ trợ bạn đặt lịch được ạ. Bạn cho mình xin thêm " + ", ".join(missing) + " nhé."
 
     if detect_confirmation(query):
         name = info.get("name")
@@ -302,7 +302,7 @@ def maybe_build_booking_response(query, history):
         f"SĐT: {info.get('phone')}\n"
         f"Địa chỉ: {info.get('address')}\n"
         f"Vấn đề: {info.get('issue')}\n"
-        "Mình xác nhận đặt lịch với thông tin này nhé?"
+        "Bạn xác nhận đặt lịch với thông tin này nhé?"
     )
 
 def format_vnd(value):
@@ -456,9 +456,9 @@ def handle_get_services(answer, messages, used_tools):
 
         if resp.status_code != 200:
             return (
-                "Dạ hiện em chưa lấy được bảng giá từ hệ thống. "
+                "Dạ hiện mình chưa lấy được bảng giá từ hệ thống. "
                 "Fixago vẫn có thể cử thợ đến kiểm tra thực tế và báo chi phí rõ ràng trước khi làm. "
-                "Mình muốn em hỗ trợ đặt lịch không ạ?"
+                "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
             )
 
         services = resp.json().get("data", [])
@@ -474,31 +474,31 @@ def handle_get_services(answer, messages, used_tools):
 
         if not services:
             return (
-                f"Dạ hiện em chưa thấy dịch vụ khớp chính xác với '{search_arg}' trong hệ thống. "
+                f"Dạ hiện mình chưa thấy dịch vụ khớp chính xác với '{search_arg}' trong hệ thống. "
                 "Nhưng Fixago có thể cử thợ đến kiểm tra thực tế và báo phương án, chi phí rõ ràng trước khi làm. "
-                "Mình muốn em hỗ trợ đặt lịch không ạ?"
+                "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
             )
 
         price_summary = build_price_summary(services)
 
         if price_summary:
             return (
-                f"Dạ Fixago có các dịch vụ phù hợp với nhu cầu của mình.\n\n"
+                f"Dạ Fixago có các dịch vụ phù hợp với nhu cầu của bạn.\n\n"
                 f"{price_summary}\n\n"
                 "Chi phí thực tế có thể thay đổi theo tình trạng tại nhà, nhưng thợ sẽ báo rõ trước khi làm. "
-                "Mình muốn em hỗ trợ đặt lịch không ạ?"
+                "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
             )
 
         return (
             "Dạ Fixago có thể hỗ trợ tình trạng này. "
             "Hiện hạng mục này cần thợ kiểm tra thực tế để báo chi phí chính xác trước khi làm. "
-            "Mình muốn em hỗ trợ đặt lịch không ạ?"
+            "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
         )
 
     except Exception as e:
         return (
-            f"Dạ hiện em chưa lấy được bảng giá do lỗi hệ thống: {e}. "
-            "Mình có thể để lại thông tin, Fixago sẽ hỗ trợ kiểm tra và báo giá rõ ràng trước khi làm ạ."
+            f"Dạ hiện mình chưa lấy được bảng giá do lỗi hệ thống: {e}. "
+            "Bạn có thể để lại thông tin, Fixago sẽ hỗ trợ kiểm tra và báo giá rõ ràng trước khi làm ạ."
         )
 
 
@@ -565,7 +565,7 @@ def handle_create_booking(answer, used_tools):
     api_context = "[KẾT QUẢ TỪ TOOL CREATE_BOOKING]:\n"
 
     if not phone:
-        return "Dạ em còn thiếu số điện thoại để tạo lịch. Mình cho em xin số điện thoại liên hệ nhé."
+        return "Dạ mình còn thiếu số điện thoại để tạo lịch. Bạn cho mình xin số điện thoại liên hệ nhé."
 
     try:
         backend_url = os.environ.get("BACKEND_API_URL", "http://127.0.0.1:3001/api/v1")
@@ -606,11 +606,11 @@ def handle_create_booking(answer, used_tools):
             f"Mã đơn: {booking_code}. "
             f"Khách hàng: {name} | SĐT: {phone} | Địa chỉ: {address}. "
             f"Vấn đề: {desc}. "
-            f"Thợ Fixago sẽ liên hệ sớm để hỗ trợ mình nhé."
+            f"Thợ Fixago sẽ liên hệ sớm để hỗ trợ bạn nhé."
         )
 
     err = api_context.split("ERR:", 1)[1].strip() if "ERR:" in api_context else api_context
-    return f"Xin lỗi, hiện em không thể tạo đơn lúc này. Lỗi: {err}"
+    return f"Xin lỗi, hiện mình không thể tạo đơn lúc này. Lỗi: {err}"
 
 
 def repair_booking_tool_call_if_needed(answer, query, history):
