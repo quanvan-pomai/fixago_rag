@@ -600,6 +600,24 @@ def _static_fallback(query: str) -> str:
             "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
         )
 
+    # Generic price question with no specific service — consistent template answer
+    # Matches: "giá bên bạn thế nào", "giá cả ra sao", "bao tiền vậy", "giá chung"
+    _GENERIC_PRICE_Q = [
+        "giá bên", "giá cả", "giá ra sao", "giá như thế", "giá thế nào",
+        "bảng giá", "giá chung", "giá dịch vụ", "giá của fixago",
+        "gia ca", "gia the nao", "gia dich vu",
+    ]
+    _has_service_word = any(s in q for s in [
+        "điện", "nước", "máy lạnh", "xây", "thạch cao", "ống", "vòi", "bồn",
+        "dien", "nuoc", "may lanh", "xay dung", "thach cao",
+    ])
+    if any(k in q for k in _GENERIC_PRICE_Q) and not _has_service_word:
+        return (
+            "Dạ giá của Fixago tùy theo hạng mục và tình trạng thực tế — "
+            "thợ sẽ báo rõ chi phí trước khi làm bạn nhé. "
+            "Bạn đang cần tư vấn dịch vụ nào ạ? (điện, nước, máy lạnh, xây dựng...)"
+        )
+
     return ""
 
 
@@ -939,7 +957,7 @@ _PROMPT_LEAK_PHRASES = [
 ]
 
 
-def _validate_llm_output(response: str, data_block: str | None) -> str | None:
+def _validate_llm_output(response: str, data_block: str | None, query: str = "") -> str | None:
     """
     Validate LLM output quality.
     Returns a replacement string if bad, None if OK.
@@ -956,6 +974,17 @@ def _validate_llm_output(response: str, data_block: str | None) -> str | None:
     # Prompt internals leaked
     if any(p in r for p in _PROMPT_LEAK_PHRASES):
         return "Dạ mình gặp sự cố xử lý. Bạn thử hỏi lại nhé ạ."
+
+    # Wrong script — Cyrillic/Arabic/etc in response when query is Vietnamese or no-accent VI
+    # "Co uy tin khong?" → should never return Russian
+    _has_cyrillic = bool(re.search(r'[Ѐ-ӿ]', r))
+    _has_arabic   = bool(re.search(r'[؀-ۿ]', r))
+    _has_cjk      = bool(re.search(r'[一-鿿぀-ゟ゠-ヿ]', r))
+    if _has_cyrillic or _has_arabic or _has_cjk:
+        # Only flag if the query itself wasn't in that script
+        _query_has_cyrillic = bool(re.search(r'[Ѐ-ӿ]', query))
+        if not _query_has_cyrillic:
+            return "Dạ mình gặp sự cố xử lý. Bạn thử hỏi lại nhé ạ."
 
     # Model claims no data when real data was injected
     if data_block:
@@ -990,11 +1019,13 @@ def _llm_with_injected_data(
         f"[DỮ LIỆU HỆ THỐNG — chỉ dùng thông tin này để trả lời, không bịa thêm]\n"
         f"{data_block}\n"
         f"[/DỮ LIỆU]\n\n"
+        f"Trả lời ngắn gọn, thân thiện, dùng 'mình'/'bạn'/'dạ'. "
+        f"Dùng đúng ngôn ngữ của khách. Không bịa thêm ngoài dữ liệu.\n\n"
         f"{query}"
     )
     llm_messages = messages[:-1] + [{"role": "user", "content": instruction}]
-    raw = llm_chat(llm_messages, temperature=0.1)
-    fix = _validate_llm_output(raw, data_block)
+    raw = llm_chat(llm_messages, temperature=0.3)
+    fix = _validate_llm_output(raw, data_block, query)
     return fix if fix is not None else raw
 
 
@@ -1140,8 +1171,16 @@ def _run_legacy_tool_path(query: str, history: list, messages: list, used_tools:
             return llm_chat(llm_messages, temperature=0.1)
 
     # 6. Pure LLM — conversational (comparison, intro, quality, off-topic within scope)
-    raw = llm_chat(messages, temperature=0.2)
-    fix = _validate_llm_output(raw, None)  # structural checks only (no data_block)
+    # Add a light tone anchor to the last user message so 3B doesn't drift to
+    # wrong language or robotic tone on short/no-accent queries
+    _tone_hint = "Trả lời ngắn gọn, thân thiện, đúng ngôn ngữ của khách, dùng 'mình'/'bạn'/'dạ'.\n\n"
+    _last = messages[-1]
+    _anchored_messages = messages[:-1] + [{
+        "role": _last["role"],
+        "content": _tone_hint + _last.get("content", ""),
+    }]
+    raw = llm_chat(_anchored_messages, temperature=0.3)
+    fix = _validate_llm_output(raw, None, query)
     return fix if fix is not None else raw
 
 
