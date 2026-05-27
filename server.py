@@ -100,32 +100,81 @@ def _load_system_prompt() -> str:
         return "Bạn là Trợ lý AI của Fixago. Luôn trả lời bằng tiếng Việt, lịch sự, ngắn gọn và hữu ích."
 
 
-def _build_system_prompt(base: str, booking_state: dict) -> str:
+# ── Dynamic few-shot injection ────────────────────────────────────────────────
+# Intent-specific Q&A examples — only 2-3 relevant shots are injected per call.
+# Small models are confused by too many examples; selecting per-intent dramatically
+# reduces system prompt size while keeping the model on-track.
+
+_INTENT_SHOTS: dict[str | None, list[str]] = {
+    "get_groups": [
+        "Q: Fixago có dịch vụ gì?\nA: CALL_TOOL: get_groups()",
+        "Q: Bên bạn làm được gì?\nA: CALL_TOOL: get_groups()",
+    ],
+    "get_promotions": [
+        "Q: Có khuyến mãi gì không?\nA: CALL_TOOL: get_promotions()",
+        "Q: Có mã giảm giá không?\nA: CALL_TOOL: get_promotions()",
+    ],
+    "get_services_nước": [
+        "Q: Sửa ống nước giá bao nhiêu?\nA: CALL_TOOL: get_services(search=\"nước\")",
+        "Q: Nước rỉ dưới bồn rửa sửa bao nhiêu?\nA: CALL_TOOL: get_services(search=\"nước\")",
+    ],
+    "get_services_điện": [
+        "Q: Sửa chập điện bao nhiêu?\nA: CALL_TOOL: get_services(search=\"điện\")",
+        "Q: Điện hay nhảy cầu dao, chi phí thế nào?\nA: CALL_TOOL: get_services(search=\"điện\")",
+    ],
+    "get_services_máy lạnh": [
+        "Q: Điều hòa không mát giá bao nhiêu?\nA: CALL_TOOL: get_services(search=\"máy lạnh\")",
+        "Q: Máy lạnh nhỏ giọt nước thì sửa bao nhiêu?\nA: CALL_TOOL: get_services(search=\"máy lạnh\")",
+    ],
+    "get_services_xây dựng": [
+        "Q: Chống thấm tường giá bao nhiêu?\nA: CALL_TOOL: get_services(search=\"xây dựng\")",
+    ],
+    "get_services_thạch cao": [
+        "Q: Làm trần thạch cao giá bao nhiêu?\nA: CALL_TOOL: get_services(search=\"thạch cao\")",
+    ],
+    "booking": [
+        "Q: Tôi muốn đặt thợ sửa điện\nA: Dạ mình hỗ trợ bạn đặt lịch được ạ. Bạn cho mình xin họ tên, số điện thoại và địa chỉ cần sửa nhé.",
+        "Q: ok đặt đi\nA: CALL_TOOL: create_booking(name=\"...\", phone=\"...\", address=\"...\", description=\"...\")",
+    ],
+    None: [
+        "Q: Fixago có dịch vụ gì?\nA: CALL_TOOL: get_groups()",
+        "Q: Tôi muốn đặt thợ\nA: Dạ mình hỗ trợ bạn đặt lịch được ạ. Bạn cho mình xin họ tên, số điện thoại và địa chỉ cần sửa nhé.",
+    ],
+}
+
+
+def _select_few_shots(intent: str | None) -> str:
+    """Return 2-3 Q&A examples matched to the detected intent."""
+    if intent is None:
+        key: str | None = None
+    elif "get_groups" in intent:
+        key = "get_groups"
+    elif "get_promotions" in intent:
+        key = "get_promotions"
+    elif "get_services" in intent:
+        m = re.search(r'search="([^"]*)"', intent)
+        svc = m.group(1) if m else ""
+        candidate = f"get_services_{svc}"
+        key = candidate if candidate in _INTENT_SHOTS else "get_services_điện"
+    elif "create_booking" in intent:
+        key = "booking"
+    else:
+        key = None
+    shots = _INTENT_SHOTS.get(key, _INTENT_SHOTS[None])
+    return "\n\nEXAMPLES:\n" + "\n\n".join(shots) + "\n"
+
+
+def _build_system_prompt(base: str, booking_state: dict, detected_intent: str | None = None) -> str:
     """
     In native tool-call mode: return the base prompt unchanged (model gets
     tool schemas via the API payload).
-    In legacy text mode: append few-shot CALL_TOOL examples + session state.
+    In legacy text mode: append dynamically-selected few-shot examples + session state.
+    Only 2-3 examples relevant to the detected intent are injected — not all 6.
     """
     if ENABLE_NATIVE_TOOL_CALL:
         return base
 
-    examples = (
-        "\n\nEXAMPLES:\n"
-        "Q: Fixago có dịch vụ gì?\n"
-        "A: CALL_TOOL: get_groups()\n\n"
-        "Q: Sửa ống nước giá bao nhiêu?\n"
-        "A: CALL_TOOL: get_services(search=\"nước\")\n\n"
-        "Q: Có khuyến mãi hay giảm giá gì không?\n"
-        "A: CALL_TOOL: get_promotions()\n\n"
-        "Q: Sửa chập điện bao nhiêu tiền?\n"
-        "A: CALL_TOOL: get_services(search=\"điện\")\n\n"
-        "Q: Tôi muốn đặt thợ sửa điện\n"
-        "A: Dạ mình hỗ trợ bạn đặt lịch sửa điện được ạ. Bạn cho mình xin họ tên, số điện thoại và địa chỉ cần sửa nhé.\n\n"
-        "Q: Tên Nam, 0909123456, 12 Nguyễn Trãi Q1\n"
-        "A: Tên: Nam\nSĐT: 0909123456\nĐịa chỉ: 12 Nguyễn Trãi Q1\nVấn đề: sửa điện\nBạn xác nhận đặt lịch với thông tin này nhé?\n\n"
-        "Q: ok đặt đi\n"
-        "A: CALL_TOOL: create_booking(name=\"Nam\", phone=\"0909123456\", address=\"12 Nguyễn Trãi Q1\", description=\"sửa điện\")\n"
-    )
+    examples = _select_few_shots(detected_intent)
     state = (
         f"SESSION_STATE:\n"
         f"- Tên: {booking_state.get('name') or 'Chưa có'}\n"
@@ -822,6 +871,110 @@ def _is_price_question(query: str) -> bool:
     return any(s in q for s in price_signals)
 
 
+# ── Query rewriting for RAG ───────────────────────────────────────────────────
+# Converts symptom descriptions into canonical repair phrases before RAG lookup.
+# e.g. "nước cứ rỉ dưới bồn rửa" → "nước rỉ dưới bồn rửa rò rỉ nước ống nước"
+# This improves RAG recall without touching the LLM.
+
+_SYMPTOM_REWRITES = [
+    (r'rỉ.{0,8}(nước|bồn|vòi|lavabo|ống)',            "rò rỉ nước ống nước"),
+    (r'(bồn cầu|toilet).{0,10}(nghẹt|tắc)',            "tắc nghẹt bồn cầu ống thoát"),
+    (r'nước.{0,6}(chảy yếu|yếu|không lên)',            "áp lực nước yếu ống nước"),
+    (r'(điện|cầu dao).{0,8}(nhảy|hay nhảy)',           "nhảy cầu dao aptomat sự cố điện"),
+    (r'(chập|tóe lửa|cháy|hở).{0,8}điện',             "chập điện sự cố điện"),
+    (r'(điều hòa|máy lạnh).{0,10}(không mát|lạnh yếu)', "máy lạnh không lạnh nạp gas"),
+    (r'(điều hòa|máy lạnh).{0,8}(nhỏ giọt|chảy nước)',  "máy lạnh nhỏ giọt tắc ống thoát"),
+    (r'tường.{0,10}(thấm|ẩm|mốc)',                    "thấm dột tường chống thấm"),
+    (r'(mái|nhà).{0,8}dột',                            "dột mái chống thấm"),
+    (r'(sơn|tường).{0,8}(bong|bong tróc|bạc màu)',     "sơn tường bong tróc sơn lại"),
+    # No-accent variants
+    (r'nuoc.{0,6}(ri|chay yeu)',                       "rò rỉ nước ống nước"),
+    (r'dien.{0,8}(nhay|chap)',                         "điện sự cố nhảy cầu dao"),
+    (r'may lanh.{0,10}(khong mat|khong lanh)',         "máy lạnh không lạnh"),
+]
+
+
+def _rewrite_for_rag(query: str, detected_intent: str | None) -> str:
+    """
+    Enrich the user query with canonical repair keywords before RAG retrieval.
+    Returns the enriched string (or original if no rewrite applies).
+    """
+    q = query.strip()
+
+    # Prepend service keyword extracted from detected intent
+    canonical_kw = ""
+    if detected_intent and "get_services" in detected_intent:
+        m = re.search(r'search="([^"]*)"', detected_intent)
+        if m:
+            canonical_kw = m.group(1)   # e.g. "nước", "điện", "máy lạnh"
+
+    # Apply first matching symptom rewrite
+    q_lower = q.lower()
+    for pattern, phrase in _SYMPTOM_REWRITES:
+        if re.search(pattern, q_lower):
+            if phrase not in q_lower:
+                q = q + " " + phrase
+            break
+
+    if canonical_kw and canonical_kw not in q.lower():
+        q = canonical_kw + " " + q
+
+    return q
+
+
+# ── Output validator ──────────────────────────────────────────────────────────
+# Catches LLM failures: ignorance phrases despite injected data, CALL_TOOL leaks,
+# prompt content leakage. Returns a replacement string or None (response is fine).
+
+_IGNORANCE_PHRASES = [
+    "chưa có thông tin", "không có thông tin", "không tìm thấy thông tin",
+    "chưa có dữ liệu", "không có dữ liệu", "tôi không biết",
+    "mình chưa có thông tin", "chưa tìm thấy",
+    "i don't know", "don't have information", "no information available",
+    "không thể cung cấp", "không có trong hệ thống",
+]
+_TOOL_LEAK_RE = re.compile(r'CALL_TOOL\s*:', re.IGNORECASE)
+_PROMPT_LEAK_PHRASES = [
+    "[DỮ LIỆU HỆ THỐNG", "SESSION_STATE:", "EXAMPLES:\nQ:", "system prompt",
+]
+
+
+def _validate_llm_output(response: str, data_block: str | None) -> str | None:
+    """
+    Validate LLM output quality.
+    Returns a replacement string if bad, None if OK.
+    """
+    r = (response or "").strip()
+
+    # CALL_TOOL leaked into conversational output
+    if _TOOL_LEAK_RE.search(r):
+        cleaned = _TOOL_LEAK_RE.sub("", r).strip()
+        if len(cleaned) > 20:
+            return cleaned
+        return "Dạ mình gặp sự cố xử lý. Bạn thử hỏi lại nhé ạ."
+
+    # Prompt internals leaked
+    if any(p in r for p in _PROMPT_LEAK_PHRASES):
+        return "Dạ mình gặp sự cố xử lý. Bạn thử hỏi lại nhé ạ."
+
+    # Model claims no data when real data was injected
+    if data_block:
+        has_real_data = (
+            "VNĐ" in data_block
+            or "tham khảo" in data_block
+            or "dịch vụ" in data_block.lower()
+            or any(c.isdigit() for c in data_block)
+        )
+        if has_real_data and any(p in r.lower() for p in _IGNORANCE_PHRASES):
+            return (
+                "Dạ đây là thông tin Fixago có:\n\n"
+                + data_block.strip()
+                + "\n\nBạn cần hỗ trợ thêm không ạ?"
+            )
+
+    return None  # response is valid
+
+
 def _llm_with_injected_data(
     query: str,
     data_block: str,
@@ -831,8 +984,8 @@ def _llm_with_injected_data(
     Inject backend data as a mandatory fact context using the system prompt's
     [DỮ LIỆU HỆ THỐNG] format, then let the LLM answer naturally.
     The LLM handles language (Vietnamese/English/mixed) from the system prompt rule.
+    Output is validated — if the model incorrectly claims no data, a fallback is returned.
     """
-    # Wrap data in the format the system prompt already teaches the model to use
     instruction = (
         f"[DỮ LIỆU HỆ THỐNG — chỉ dùng thông tin này để trả lời, không bịa thêm]\n"
         f"{data_block}\n"
@@ -840,7 +993,9 @@ def _llm_with_injected_data(
         f"{query}"
     )
     llm_messages = messages[:-1] + [{"role": "user", "content": instruction}]
-    return llm_chat(llm_messages, temperature=0.1)
+    raw = llm_chat(llm_messages, temperature=0.1)
+    fix = _validate_llm_output(raw, data_block)
+    return fix if fix is not None else raw
 
 
 def _extract_clean_query(last_user_content: str) -> str:
@@ -985,7 +1140,9 @@ def _run_legacy_tool_path(query: str, history: list, messages: list, used_tools:
             return llm_chat(llm_messages, temperature=0.1)
 
     # 6. Pure LLM — conversational (comparison, intro, quality, off-topic within scope)
-    return llm_chat(messages, temperature=0.2)
+    raw = llm_chat(messages, temperature=0.2)
+    fix = _validate_llm_output(raw, None)  # structural checks only (no data_block)
+    return fix if fix is not None else raw
 
 
 def _run_legacy_fast_path(query: str, history: list, messages: list, used_tools: list):
@@ -1086,8 +1243,9 @@ def query_rag():
         history   = session.get("history", [])
 
         # ── System prompt ─────────────────────────────────────────────────────
-        base_prompt = data.get("system_prompt", _load_system_prompt())
-        system      = _build_system_prompt(base_prompt, session.get("booking_state", {}))
+        base_prompt   = data.get("system_prompt", _load_system_prompt())
+        _early_intent = _detect_tool_intent(query)
+        system        = _build_system_prompt(base_prompt, session.get("booking_state", {}), _early_intent)
 
         # ── Fast path ─────────────────────────────────────────────────────────
         # Most production traffic is static policy, booking state, or backend
@@ -1109,11 +1267,21 @@ def query_rag():
                 })
 
         # ── RAG context ───────────────────────────────────────────────────────
+        # Skip RAG when a service tool is detected — backend data will be injected
+        # directly by _execute_tool(), so RAG context would only add noise + latency.
+        # get_groups / get_promotions / None (conversational) still use RAG.
         rag_context = ""
-        try:
-            rag_context = rag_engine.retrieve_context(rag_engine.normalize_query(query), top_k=3)
-        except Exception as exc:
-            print(f"RAG retrieval failed: {exc}")
+        _skip_rag   = bool(_early_intent and "get_services" in _early_intent)
+        if not _skip_rag:
+            try:
+                _rewritten  = _rewrite_for_rag(query, _early_intent)
+                rag_context = rag_engine.retrieve_context(
+                    rag_engine.normalize_query(_rewritten),
+                    top_k=2,
+                    max_len=2000,
+                )
+            except Exception as exc:
+                print(f"RAG retrieval failed: {exc}")
 
         # ── Cache key ─────────────────────────────────────────────────────────
         history_text = "\n".join(
