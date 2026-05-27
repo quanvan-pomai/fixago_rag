@@ -204,17 +204,22 @@ You need **3 terminals** running simultaneously.
 
 ### Terminal 1 — LLM Inference Server (Cheesebrain)
 
+Recommended low-resource config for a **4 GB RAM / 2 CPU core** machine:
+
 ```bash
 cd fixago_rag
 
+CHEESE_SQUEEZE_AGGRESSIVENESS=0 \
 ./cheesebrain/build/bin/cheese-server \
-  --model ./models/qwen2.5-3b-instruct-q4_k_m.gguf \
+  --model ./models/qwen2.5-1.5b-instruct-q8_0.gguf \
   --host 0.0.0.0 \
   --port 8080 \
-  --ctx-size 4096 \
-  --n-predict 512 \
-  --threads 8 \
-  --parallel 1
+  --ctx-size 512 \
+  --n-predict 128 \
+  --threads 2 \
+  --parallel 1 \
+  --no-cache-prompt \
+  --cache-ram 0
 ```
 
 Wait until you see:
@@ -228,10 +233,20 @@ main: server is listening on http://0.0.0.0:8080
 | Flag | Description |
 |---|---|
 | `--model` | Path to your GGUF model file |
-| `--threads` | Number of CPU threads (set to `nproc`) |
-| `--ctx-size` | Context window size in tokens |
-| `--n-predict` | Max tokens to generate per response |
-| `--parallel` | Number of parallel inference slots |
+| `--threads 2` | Match the available CPU cores. Avoid setting this higher on a 2-core machine. |
+| `--ctx-size 512` | Small context window to keep RAM and prompt processing low. |
+| `--n-predict 128` | Shorter replies; smoother on weak CPUs than `256` or `512`. |
+| `--parallel 1` | One inference slot. More slots increase memory use. |
+| `--no-cache-prompt` | Disables Cheesebrain prompt/KV prompt reuse for predictable low-memory behavior. |
+| `--cache-ram 0` | Disables Cheesebrain host prompt cache memory. |
+| `CHEESE_SQUEEZE_AGGRESSIVENESS=0` | Disables ContextSqueezer. With `--ctx-size 512`, keep prompts short instead of compressing them. |
+
+Notes for this project:
+
+- Keep the API `session_id`; it preserves booking state and makes multi-turn booking smarter.
+- Response cache in `server.py` is disabled by default. Send `"use_cache": true` only when intentionally testing repeated identical prompts.
+- If responses feel too short, increase `--n-predict` to `192` or `256`. If the machine becomes slow, return to `128`.
+- If you have more RAM/CPU, use a Q4/Q5 3B model and raise `--ctx-size` gradually, for example `1024`, then `2048`.
 
 ### Terminal 2 — Fix-Go Backend API
 

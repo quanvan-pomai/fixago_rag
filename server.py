@@ -1,49 +1,90 @@
 #!/usr/bin/env python3
-import os
-from dotenv import load_dotenv
-load_dotenv()
+"""
+server.py
+---------
+Flask entry point for the Fixago RAG server.
 
-import re
+Responsibilities:
+  - HTTP routes (ingest, retrieve, query)
+  - Session management (load / save via PomaiCache)
+  - Orchestration: decide which path to take (booking / tool / LLM)
+  - Prompt building + response caching
+
+All business logic lives in dedicated modules:
+  booking/extractor.py   — extract & merge booking fields from text
+  booking/handler.py     — booking flow, create_booking execution
+  tools/handlers.py      — get_groups, get_services, get_promotions
+  llm_client/client.py   — LLM calls (plain, tool-calling, summarize)
+  db/                    — vector store + cache (via rag_engine facade)
+"""
 import hashlib
-import requests
 import json
+import os
+import re
 import uuid
-from flask import Flask, request, jsonify, send_file
+
+from dotenv import load_dotenv
+from flask import Flask, jsonify, request, send_file
 
 import rag_engine
-from tools_schema import FIXAGO_TOOLS
+from booking.extractor import detect_confirmation, detect_negation, merge_booking_info
+from booking.handler import (
+    build_booking_response,
+    handle_create_booking,
+    normalize_service_search,
+    repair_booking_tool_call,
+)
+from llm_client.client import (
+    llm_chat,
+    llm_chat_with_tools,
+    llm_summarize,
+    load_grammar,
+)
+from tools.handlers import handle_get_groups, handle_get_promotions, handle_get_services
 
-# Feature flag: set ENABLE_NATIVE_TOOL_CALL=1 to use OpenAI-style function calling
-# Requires cheese-server started with --jinja flag
+load_dotenv()
+
+# ── Feature flags ─────────────────────────────────────────────────────────────
+# Set ENABLE_NATIVE_TOOL_CALL=1 when cheese-server is started with --jinja.
 ENABLE_NATIVE_TOOL_CALL = os.environ.get("ENABLE_NATIVE_TOOL_CALL", "0") in ("1", "true", "yes")
 
+app = Flask(__name__)
+
+
+# ── Session management ────────────────────────────────────────────────────────
+
 class SessionManager:
+    _TTL_MS = 7_200_000  # 2 hours
+
     @staticmethod
-    def get_session(session_id: str) -> dict:
+    def get(session_id: str) -> dict:
         if not session_id:
             return {"history": [], "booking_state": {}}
         try:
             val = rag_engine.cache.get(f"session:{session_id}")
             if val:
                 return json.loads(val.decode("utf-8"))
-        except Exception as e:
-            print(f"Session load failed: {e}")
+        except Exception as exc:
+            print(f"Session load failed: {exc}")
         return {"history": [], "booking_state": {}}
 
     @staticmethod
-    def save_session(session_id: str, session_data: dict):
+    def save(session_id: str, data: dict):
         if not session_id:
             return
         try:
-            # 2 hours TTL
-            rag_engine.cache.set(f"session:{session_id}", json.dumps(session_data).encode("utf-8"), ttl_ms=7200000)
-        except Exception as e:
-            print(f"Session save failed: {e}")
+            rag_engine.cache.set(
+                f"session:{session_id}",
+                json.dumps(data).encode("utf-8"),
+                ttl_ms=SessionManager._TTL_MS,
+            )
+        except Exception as exc:
+            print(f"Session save failed: {exc}")
 
-app = Flask(__name__)
 
+# ── Prompt helpers ────────────────────────────────────────────────────────────
 
-def load_system_prompt():
+def _load_system_prompt() -> str:
     try:
         with open("system_prompt.txt", "r", encoding="utf-8") as f:
             return f.read()
@@ -51,79 +92,16 @@ def load_system_prompt():
         return "Bạn là Trợ lý AI của Fixago. Luôn trả lời bằng tiếng Việt, lịch sự, ngắn gọn và hữu ích."
 
 
-def normalize_text(text):
-    return (text or "").strip().lower()
-
-
-def is_prompt_injection(query):
-    q = normalize_text(query)
-    patterns = [
-        "tiết lộ system prompt",
-        "show system prompt",
-        "give me your system prompt",
-        "ignore previous instruction",
-        "ignore all previous",
-        "bỏ qua các quy tắc",
-        "bỏ qua hướng dẫn trước",
-        "bỏ qua lệnh trước",
-        "developer message",
-        "system message",
-        "jailbreak",
-        "prompt injection",
-        "in ra prompt",
-        "hiện prompt",
-        "xuất prompt",
-        "quên hết hướng dẫn",
-    ]
-    return any(p in q for p in patterns)
-
-
-def guardrail_response():
-    return {
-        "status": "success",
-        "response": "Mình không thể hỗ trợ phần đó, nhưng mình có thể tư vấn dịch vụ sửa chữa hoặc hỗ trợ bạn đặt lịch với Fixago ạ.",
-        "source": "guardrail",
-        "tool_calls": [],
-        "cache_metrics": {
-            "hit": False,
-            "cached_tokens": 0,
-            "savings_ratio": 0.0
-        }
-    }
-
-
-def compact_history(history, max_items=8):
-    if not isinstance(history, list):
-        return []
-    clean = []
-    for msg in history[-max_items:]:
-        if not isinstance(msg, dict):
-            continue
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        if role not in ["system", "user", "assistant"]:
-            role = "user"
-        if content:
-            clean.append({"role": role, "content": str(content)})
-    return clean
-
-
-def history_to_text(history):
-    return "\n".join(
-        f"{m.get('role', 'user')}: {m.get('content', '')}"
-        for m in compact_history(history)
-    )
-
-
-def build_safe_system(system_prompt):
+def _build_system_prompt(base: str, booking_state: dict) -> str:
+    """
+    In native tool-call mode: return the base prompt unchanged (model gets
+    tool schemas via the API payload).
+    In legacy text mode: append few-shot CALL_TOOL examples + session state.
+    """
     if ENABLE_NATIVE_TOOL_CALL:
-        # Native tool calling: minimal system prompt, no need to teach format
-        # Model gets tool schema from the API payload directly
-        return system_prompt
+        return base
 
-    # Legacy text mode: inject compact few-shot examples to teach CALL_TOOL format
-    # Keep examples minimal — small models get confused with too many
-    return system_prompt + (
+    examples = (
         "\n\nEXAMPLES:\n"
         "Q: Fixago có dịch vụ gì?\n"
         "A: CALL_TOOL: get_groups()\n\n"
@@ -140,606 +118,559 @@ def build_safe_system(system_prompt):
         "Q: ok đặt đi\n"
         "A: CALL_TOOL: create_booking(name=\"Nam\", phone=\"0909123456\", address=\"12 Nguyễn Trãi Q1\", description=\"sửa điện\")\n"
     )
+    state = (
+        f"SESSION_STATE:\n"
+        f"- Tên: {booking_state.get('name') or 'Chưa có'}\n"
+        f"- SĐT: {booking_state.get('phone') or 'Chưa có'}\n"
+        f"- Địa chỉ: {booking_state.get('address') or 'Chưa có'}\n"
+        f"- Vấn đề: {booking_state.get('issue') or 'Chưa có'}\n\n"
+    )
+    return base + examples.replace("EXAMPLES:\n", state + "EXAMPLES:\n")
 
 
-def detect_tool_intent(query):
-    q = normalize_text(query)
+def _compact_history(history, max_items=8):
+    if not isinstance(history, list):
+        return []
+    clean = []
+    for msg in history[-max_items:]:
+        if not isinstance(msg, dict):
+            continue
+        role    = msg.get("role", "user")
+        content = msg.get("content", "")
+        if role not in ("system", "user", "assistant"):
+            role = "user"
+        if content:
+            clean.append({"role": role, "content": str(content)})
+    return clean
 
-    if any(k in q for k in ["khuyến mãi", "giảm giá", "ưu đãi", "voucher", "mã giảm", "coupon"]):
-        return "CALL_TOOL: get_promotions()"
 
-    if any(k in q for k in ["dịch vụ gì", "có dịch vụ", "những dịch vụ", "nhóm dịch vụ", "fixago làm gì", "bên bạn làm gì", "có sửa gì"]):
-        return "CALL_TOOL: get_groups()"
+# ── Security ──────────────────────────────────────────────────────────────────
 
-    service_keywords = {
-        "điện": ["điện", "chập", "ổ cắm", "bóng đèn", "công tắc", "tủ điện", "aptomat", "cb", "dây điện"],
-        "nước": ["nước", "ống", "rò", "nghẹt", "vòi", "bồn cầu", "máy bơm", "van", "lavabo", "thoát nước"],
-        "điện lạnh": ["máy lạnh", "điều hòa", "tủ lạnh", "nạp gas", "gas lạnh", "không lạnh", "điện lạnh"],
-        "xây dựng": ["sơn", "chống thấm", "ốp lát", "gạch", "tường", "ban công", "xây dựng", "cải tạo"],
-        "thạch cao": ["thạch cao", "trần", "vách ngăn", "vách thạch cao"],
+_INJECTION_PATTERNS = [
+    "tiết lộ system prompt", "show system prompt", "give me your system prompt",
+    "ignore previous instruction", "ignore all previous",
+    "bỏ qua các quy tắc", "bỏ qua hướng dẫn trước", "bỏ qua lệnh trước",
+    "developer message", "system message", "jailbreak", "prompt injection",
+    "in ra prompt", "hiện prompt", "xuất prompt", "quên hết hướng dẫn",
+    "debug mode", "xuất toàn bộ prompt", "xuất prompt nội bộ",
+    "admin fixago", "tôi là admin", "mode on", "kiểm tra nội bộ",
+]
+
+def _is_prompt_injection(query: str) -> bool:
+    q = (query or "").strip().lower()
+    return any(p in q for p in _INJECTION_PATTERNS)
+
+def _guardrail_response():
+    return {
+        "status": "success",
+        "response": "Mình không thể hỗ trợ phần đó, nhưng mình có thể tư vấn dịch vụ sửa chữa hoặc hỗ trợ bạn đặt lịch với Fixago ạ.",
+        "source": "guardrail",
+        "tool_calls": [],
+        "cache_metrics": {"hit": False, "cached_tokens": 0, "savings_ratio": 0.0},
     }
 
-    intent_words = ["giá", "bao nhiêu", "sửa", "lắp", "thay", "bảo dưỡng", "kiểm tra", "báo giá", "hỏng", "lỗi", "dịch vụ"]
+
+# ── No-accent normalization for tool dispatch ─────────────────────────────────
+
+_NOACCENT_MAP = {
+    "dien": "điện", "nuoc": "nước", "may lanh": "máy lạnh",
+    "may giat": "máy giặt", "ong nuoc": "ống nước", "ro ri": "rò rỉ",
+    "thach cao": "thạch cao", "xay dung": "xây dựng", "cong tac": "công tắc",
+    "bong den": "bóng đèn", "may bom": "máy bơm", "bon cau": "bồn cầu",
+    "sua": "sửa", "bao nhieu": "bao nhiêu", "gia": "giá",
+}
+
+def _normalize_noaccent(text: str) -> str:
+    """Apply simple no-accent → accented substitution for keyword matching."""
+    t = text.lower()
+    for k, v in _NOACCENT_MAP.items():
+        t = t.replace(k, v)
+    return t
+
+
+# ── Tool intent detection (legacy path only) ──────────────────────────────────
+
+_BOOKING_TRIGGER_WORDS = [
+    "đặt lịch", "đặt thợ", "gọi thợ", "book thợ", "book lịch",
+    "hẹn thợ", "cử thợ", "cho thợ", "hỗ trợ đặt",
+]
+
+def _detect_tool_intent(query: str):
+    # Normalize no-accent input before matching
+    q = _normalize_noaccent((query or "").strip().lower())
+
+    # If explicit booking trigger, don't dispatch as price tool
+    # (build_booking_response will handle it)
+    is_booking_trigger = any(k in q for k in _BOOKING_TRIGGER_WORDS)
+    if is_booking_trigger and not any(k in q for k in ["giá", "bao nhiêu", "how much", "price", "cost"]):
+        return None
+
+    # Promotion — highest priority, check before service
+    if any(k in q for k in [
+        "khuyến mãi", "giảm giá", "ưu đãi", "voucher", "mã giảm", "coupon",
+        "discount", "promotion", "mã khuyến", "giảm %", "mã giảm",
+    ]):
+        return "CALL_TOOL: get_promotions()"
+
+    # EN service-list queries
+    if any(k in q for k in [
+        "what service", "what can you", "what do you", "what does fixago",
+        "services do you", "services does fixago", "services available",
+    ]):
+        return "CALL_TOOL: get_groups()"
+
+    # VI service-list queries
+    if any(k in q for k in [
+        "dịch vụ gì", "có dịch vụ", "những dịch vụ", "nhóm dịch vụ",
+        "fixago làm gì", "bên bạn làm gì", "có sửa gì", "provide",
+    ]):
+        return "CALL_TOOL: get_groups()"
+
+    service_map = {
+        "điện":      ["điện", "chập", "ổ cắm", "bóng đèn", "công tắc", "tủ điện",
+                      "aptomat", "cb", "dây điện", "electrical", "electric", "wire",
+                      "circuit", "breaker", "trạm sạc", "năng lượng mặt trời"],
+        "nước":      ["nước", "ống", "rò", "nghẹt", "vòi", "bồn cầu", "máy bơm",
+                      "van", "lavabo", "thoát nước", "pipe", "plumb", "leak", "water",
+                      "drain", "clog", "sewage"],
+        "máy lạnh":  ["máy lạnh", "điều hòa", "tủ lạnh", "nạp gas", "gas lạnh",
+                      "không lạnh", "điện lạnh", "máy giặt", "refrigerat",
+                      "air conditioner", "air con", "aircon", "ac unit", "washing machine",
+                      "washer", "dryer", "freezer"],
+        "xây dựng":  ["sơn", "chống thấm", "ốp lát", "gạch", "tường", "ban công",
+                      "xây dựng", "cải tạo", "thấm", "dột", "renovation", "paint",
+                      "waterproof", "tile", "cement"],
+        "thạch cao": ["thạch cao", "trần thạch cao", "vách ngăn", "plasterboard",
+                      "gypsum", "drywall", "ceiling board"],
+    }
+    intent_words = [
+        "giá", "bao nhiêu", "sửa", "lắp", "thay", "bảo dưỡng", "vệ sinh",
+        "kiểm tra", "báo giá", "hỏng", "lỗi", "dịch vụ", "tư vấn",
+        "how much", "repair", "fix", "install", "replace", "cost", "price",
+        "service", "maintenance", "check",
+        "làm gì", "phải làm", "xử lý", "khắc phục", "nguy hiểm không",
+        "cần làm", "nên làm", "bị", "không lên", "không hoạt động",
+        "không mát", "không lạnh", "rò", "rỉ", "nghẹt", "tắc", "vỡ",
+    ]
+
     if any(w in q for w in intent_words):
-        for key, kws in service_keywords.items():
+        for key, kws in service_map.items():
             if any(kw in q for kw in kws):
+                return f'CALL_TOOL: get_services(search="{key}")'
+
+    # Short single-service reply (e.g. "Điện", "Nước", "Máy lạnh") — user clarifying service type
+    if len(q.split()) <= 3:
+        for key, kws in service_map.items():
+            if any(kw == q.strip() or q.strip().startswith(kw) for kw in kws):
                 return f'CALL_TOOL: get_services(search="{key}")'
 
     return None
 
 
-def detect_booking_intent(query):
-    q = normalize_text(query)
-    return any(k in q for k in [
-        "đặt lịch",
-        "book",
-        "gọi thợ",
-        "đặt thợ",
-        "cho thợ",
-        "cử thợ",
-        "hẹn thợ",
-        "qua sửa",
-        "đến sửa",
-        "đến kiểm tra",
-        "hỗ trợ đặt",
-    ])
+# ── Static fallback (no LLM needed) ──────────────────────────────────────────
 
+def _static_fallback(query: str) -> str:
+    """
+    For queries that would fall through to LLM but have predictable answers,
+    return a canned response to avoid LLM latency.
+    Returns empty string if no static answer fits.
+    """
+    q = (query or "").lower()
 
-def detect_confirmation(query):
-    q = normalize_text(query)
-    confirm_words = [
-        "xác nhận",
-        "đồng ý",
-        "ok",
-        "oke",
-        "okay",
-        "được",
-        "đặt đi",
-        "book đi",
-        "làm đi",
-        "chốt",
-        "yes",
-        "có",
-        "ừ",
-        "uh",
-    ]
-    return any(w in q for w in confirm_words)
-
-
-def extract_phone(text):
-    if not text:
-        return None
-    match = re.search(r'(\+?84|0)(?:[\s\.-]?\d){8,10}', text)
-    if not match:
-        return None
-    phone = re.sub(r'[\s\.-]', '', match.group(0))
-    return phone
-
-
-def extract_labeled_value(text, labels):
-    if not text:
-        return None
-    label_pattern = "|".join(re.escape(x) for x in labels)
-    match = re.search(rf'(?:{label_pattern})\s*[:\-]\s*(.+)', text, flags=re.IGNORECASE)
-    if match:
-        value = match.group(1).strip()
-        value = re.split(r'\n|,?\s*(?:SĐT|Sđt|Phone|Điện thoại|Địa chỉ|Address|Vấn đề|Issue|Tên|Name)\s*[:\-]', value)[0].strip()
-        return value.rstrip('.,; ') if value else None
-    return None
-
-
-def extract_booking_from_text(text):
-    if not text:
-        return {}
-
-    name = extract_labeled_value(text, ["Tên", "Name", "Họ tên", "Khách hàng"])
-    phone = extract_labeled_value(text, ["SĐT", "Sđt", "Phone", "Điện thoại", "Số điện thoại"])
-    address = extract_labeled_value(text, ["Địa chỉ", "Address"])
-    issue = extract_labeled_value(text, ["Vấn đề", "Issue", "Lỗi", "Nội dung", "Mô tả"])
-
-    found_phone = extract_phone(text)
-    if not phone and found_phone:
-        phone = found_phone
-
-    return {
-        "name": name,
-        "phone": phone,
-        "address": address,
-        "issue": issue,
-    }
-
-
-def merge_booking_info(query, history):
-    info = {
-        "name": None,
-        "phone": None,
-        "address": None,
-        "issue": None,
-    }
-
-    for msg in compact_history(history, max_items=12):
-        content = msg.get("content", "")
-        extracted = extract_booking_from_text(content)
-        for k, v in extracted.items():
-            if v and not info.get(k):
-                info[k] = v
-
-    current = extract_booking_from_text(query)
-    for k, v in current.items():
-        if v:
-            info[k] = v
-
-    if not info.get("issue"):
-        for msg in reversed(compact_history(history, max_items=12)):
-            if msg.get("role") == "user":
-                c = msg.get("content", "")
-                if detect_booking_intent(c) or any(k in normalize_text(c) for k in ["sửa", "hỏng", "lỗi", "chập", "rò", "nghẹt", "không lạnh"]):
-                    info["issue"] = c
-                    break
-
-    if not info.get("issue"):
-        info["issue"] = query
-
-    return info
-
-
-def maybe_build_booking_response(query, history):
-    has_intent = detect_booking_intent(query) or detect_confirmation(query)
-    if not has_intent:
-        for turn in reversed(history[-4:]): # check recent history
-            if turn.get("role") == "user" and detect_booking_intent(turn.get("content", "")):
-                has_intent = True
-                break
-    
-    if not has_intent:
-        return None
-
-    info = merge_booking_info(query, history)
-    missing = []
-
-    if not info.get("name"):
-        missing.append("họ tên")
-    if not info.get("phone"):
-        missing.append("số điện thoại")
-    if not info.get("address"):
-        missing.append("địa chỉ cần sửa")
-
-    if missing:
-        if len(missing) == 3:
-            return "Dạ mình hỗ trợ bạn đặt lịch được ạ. Bạn cho Fixago xin họ tên, số điện thoại và địa chỉ cần sửa nhé."
-        return "Dạ mình hỗ trợ bạn đặt lịch được ạ. Bạn cho mình xin thêm " + ", ".join(missing) + " nhé."
-
-    if detect_confirmation(query):
-        name = info.get("name")
-        phone = info.get("phone")
-        address = info.get("address")
-        issue = info.get("issue") or "Khách hàng yêu cầu thợ đến kiểm tra"
-        return f'CALL_TOOL: create_booking(name="{name}", phone="{phone}", address="{address}", description="{issue}")'
-
-    return (
-        f"Tên: {info.get('name')}\n"
-        f"SĐT: {info.get('phone')}\n"
-        f"Địa chỉ: {info.get('address')}\n"
-        f"Vấn đề: {info.get('issue')}\n"
-        "Bạn xác nhận đặt lịch với thông tin này nhé?"
+    # Don't fire any static if the message is pure contact data being provided
+    # (name + phone or address = user is mid-booking, not asking a question)
+    from booking.extractor import extract_booking_from_text as _ex_check
+    _contact = _ex_check(query)
+    _is_contact_reply = (
+        (_contact.get("phone") or _contact.get("name"))
+        and not any(kw in q for kw in ["?", "bao nhiêu", "giá", "gì vậy", "là gì",
+                                        "tư vấn", "hỏi", "khuyến mãi", "dịch vụ"])
     )
-
-def format_vnd(value):
-    try:
-        n = int(float(value))
-    except Exception:
-        n = 0
-    return f"{n:,}".replace(",", ".") + " VNĐ"
-
-
-def build_price_summary(services):
-    priced = []
-    quote_required = []
-
-    for s in services:
-        name = s.get("name", "Dịch vụ")
-        price = s.get("unitPrice", 0) or 0
-        estimated_time = s.get("estimatedTime", 0) or 0
-
-        try:
-            price_num = int(float(price))
-        except Exception:
-            price_num = 0
-
-        item = {
-            "name": name,
-            "price": price_num,
-            "estimated_time": estimated_time,
-        }
-
-        if price_num > 0:
-            priced.append(item)
-        else:
-            quote_required.append(item)
-
-    if not priced and not quote_required:
-        return None
-
-    lines = []
-
-    if priced:
-        prices = [x["price"] for x in priced]
-        min_price = min(prices)
-        max_price = max(prices)
-
-        if min_price == max_price:
-            lines.append(f"Giá tham khảo: {format_vnd(min_price)}.")
-        else:
-            lines.append(f"Khoảng giá tham khảo: {format_vnd(min_price)} - {format_vnd(max_price)}.")
-
-        lines.append("Một số dịch vụ phù hợp:")
-        for item in priced[:5]:
-            time_text = f", thời gian khoảng {item['estimated_time']} phút" if item["estimated_time"] else ""
-            lines.append(f"- {item['name']}: {format_vnd(item['price'])}{time_text}.")
-
-    if quote_required:
-        names = ", ".join(x["name"] for x in quote_required[:3])
-        lines.append(f"Một số hạng mục như {names} cần khảo sát để báo giá chính xác.")
-
-    return "\n".join(lines)
-
-
-def normalize_service_search(raw_search):
-    search_lower = normalize_text(raw_search)
-
-    if any(k in search_lower for k in ["máy lạnh", "điều hòa", "tủ lạnh", "gas", "không lạnh", "lạnh", "điện lạnh"]):
-        return "máy lạnh"
-    if any(k in search_lower for k in ["điện", "chập", "ổ cắm", "bóng đèn", "công tắc", "tủ điện", "aptomat", "cb", "dây điện"]):
-        return "điện"
-    if any(k in search_lower for k in ["nước", "ống", "bơm", "van", "bồn", "vòi", "nghẹt", "rò", "lavabo", "thoát nước"]):
-        return "nước"
-    if any(k in search_lower for k in ["giặt", "máy giặt"]):
-        return "máy giặt"
-    if any(k in search_lower for k in ["sơn", "chống thấm", "ốp lát", "tường", "ban công", "xây", "trát", "dột", "bê tông"]):
-        return "xây dựng"
-    if any(k in search_lower for k in ["thạch cao", "trần", "vách ngăn"]):
-        return "thạch cao"
-
-    return raw_search.strip()
-
-
-def llm_chat(messages, temperature=0.0, timeout=300, grammar=None):
-    payload = {
-        "messages": messages,
-        "temperature": temperature,
-    }
-    if grammar:
-        payload["grammar"] = grammar
-
-    response = requests.post(
-        "http://127.0.0.1:8080/v1/chat/completions",
-        json=payload,
-        timeout=timeout
-    )
-
-    if response.status_code != 200:
-        raise RuntimeError(f"LLM server returned status {response.status_code}: {response.text[:200]}")
-
-    result_json = response.json()
-    return result_json["choices"][0]["message"]["content"]
-
-
-def load_grammar(grammar_file: str) -> str:
-    """Load a GBNF grammar file, return empty string on failure."""
-    try:
-        grammar_path = os.path.join(os.path.dirname(__file__), "grammars", grammar_file)
-        with open(grammar_path, "r", encoding="utf-8") as f:
-            # Strip comment lines for cleaner payload
-            lines = [l for l in f.readlines() if not l.strip().startswith("#")]
-            return "".join(lines).strip()
-    except Exception:
+    if _is_contact_reply:
         return ""
 
+    # Pre-compute intent flags used across multiple blocks
+    _has_price_intent = any(k in q for k in ["bao nhiêu", "giá", "khuyến mãi", "ưu đãi", "how much", "price"])
+    _has_promo_intent = any(k in q for k in ["khuyến mãi", "ưu đãi", "giảm giá", "discount", "promotion"])
+    _has_booking_intent = any(k in q for k in ["đặt lịch", "gọi thợ", "đặt thợ", "book thợ", "hẹn thợ"])
 
-def llm_chat_with_tools(messages, temperature=0.0, timeout=300):
-    """
-    Native OpenAI-style function calling — requires cheese-server --jinja.
-    Returns (tool_name, tool_args_dict) if model called a tool,
-    or (None, text_response) if model replied normally.
-    """
-    payload = {
-        "messages": messages,
-        "temperature": temperature,
-        "tools": FIXAGO_TOOLS,
-        "tool_choice": "auto",
-    }
-
-    response = requests.post(
-        "http://127.0.0.1:8080/v1/chat/completions",
-        json=payload,
-        timeout=timeout
-    )
-
-    if response.status_code != 200:
-        raise RuntimeError(f"LLM server returned status {response.status_code}: {response.text[:200]}")
-
-    result_json = response.json()
-    choice = result_json["choices"][0]
-    message = choice["message"]
-
-    # Model decided to call a tool
-    tool_calls = message.get("tool_calls")
-    if tool_calls:
-        tc = tool_calls[0]  # take first tool call
-        func_name = tc["function"]["name"]
-        try:
-            func_args = json.loads(tc["function"]["arguments"])
-        except Exception:
-            func_args = {}
-        return func_name, func_args, message
-
-    # Model replied with text
-    return None, message.get("content", ""), message
-
-
-def run_second_llm(messages, api_context, instruction, timeout=120):
-    next_messages = list(messages)
-    next_messages.append({
-        "role": "user",
-        "content": f"{api_context}\n\n{instruction}"
-    })
-    return llm_chat(next_messages, temperature=0.2, timeout=timeout)
-
-
-def handle_get_groups(messages, used_tools):
-    used_tools.append("Thực thi Tool [Backend API]: Lấy danh sách các nhóm dịch vụ (GET /services/groups)...")
-    api_context = "[KẾT QUẢ TỪ TOOL GET_GROUPS]:\n"
-
-    try:
-        backend_url = os.environ.get("BACKEND_API_URL", "http://127.0.0.1:3001/api/v1")
-        resp = requests.get(f"{backend_url}/services/groups", timeout=3)
-
-        if resp.status_code == 200:
-            groups = resp.json()
-            if groups:
-                for g in groups:
-                    name = g.get("name", "Nhóm dịch vụ")
-                    desc = g.get("description", "Không có mô tả")
-                    api_context += f"- Nhóm '{name}': {desc}\n"
-            else:
-                api_context += "Hiện tại chưa có nhóm dịch vụ nào."
-        else:
-            api_context += "Hiện tại không lấy được danh sách nhóm dịch vụ."
-    except Exception as e:
-        api_context += f"Lỗi gọi Backend API: {e}"
-
-    instruction = (
-        "Hãy tổng hợp kết quả này để trả lời người dùng thật tự nhiên, thân thiện, ngắn gọn và có duyên. "
-        "Bạn là nhân viên tư vấn AI của Fixago. Nếu có dịch vụ phù hợp, hãy mời khách nói tình trạng cần sửa để được tư vấn tiếp."
-    )
-    return run_second_llm(messages, api_context, instruction)
-
-
-def handle_get_services(answer, messages, used_tools):
-    match = re.search(r'search="([^"]*)"', answer)
-    raw_search = match.group(1) if match else ""
-    search_arg = normalize_service_search(raw_search)
-
-    used_tools.append(f'Thực thi Tool [Backend API]: Tìm kiếm dịch vụ với từ khóa "{search_arg}"...')
-
-    try:
-        backend_url = os.environ.get("BACKEND_API_URL", "http://127.0.0.1:3001/api/v1")
-        resp = requests.get(
-            f"{backend_url}/services",
-            params={"search": search_arg, "limit": 10},
-            timeout=3
+    # Policy / commitment pressure
+    if any(k in q for k in ["cam kết 100%", "đền 10 triệu", "chắc chắn sửa được",
+                              "cam kết sửa", "cam kết không", "bảo đảm sửa"]):
+        return (
+            "Dạ Fixago chưa thể xác nhận kết quả trước khi thợ kiểm tra thực tế. "
+            "Thợ sẽ báo rõ phương án và chi phí trước khi tiến hành để bạn quyết định nhé."
         )
 
-        if resp.status_code != 200:
-            return (
-                "Dạ hiện mình chưa lấy được bảng giá từ hệ thống. "
-                "Fixago vẫn có thể cử thợ đến kiểm tra thực tế và báo chi phí rõ ràng trước khi làm. "
-                "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
-            )
-
-        services = resp.json().get("data", [])
-
-        if not services and search_arg in ["máy lạnh", "điện lạnh", "máy giặt"]:
-            resp = requests.get(
-                f"{backend_url}/services",
-                params={"search": "điện", "limit": 10},
-                timeout=3
-            )
-            if resp.status_code == 200:
-                services = resp.json().get("data", [])
-
-        if not services:
-            return (
-                f"Dạ hiện mình chưa thấy dịch vụ khớp chính xác với '{search_arg}' trong hệ thống. "
-                "Nhưng Fixago có thể cử thợ đến kiểm tra thực tế và báo phương án, chi phí rõ ràng trước khi làm. "
-                "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
-            )
-
-        price_summary = build_price_summary(services)
-
-        if price_summary:
-            return (
-                f"Dạ Fixago có các dịch vụ phù hợp với nhu cầu của bạn.\n\n"
-                f"{price_summary}\n\n"
-                "Chi phí thực tế có thể thay đổi theo tình trạng tại nhà, nhưng thợ sẽ báo rõ trước khi làm. "
-                "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
-            )
-
+    # Why Fixago vs street technician
+    if any(k in q for k in ["thợ ngoài đường", "thợ tự tìm", "sao phải đặt fixago", "thay vì gọi"]):
         return (
-            "Dạ Fixago có thể hỗ trợ tình trạng này. "
-            "Hiện hạng mục này cần thợ kiểm tra thực tế để báo chi phí chính xác trước khi làm. "
+            "Dạ với Fixago bạn được thợ đã xác minh, báo giá rõ ràng trước khi làm, "
+            "và được hỗ trợ nếu có vấn đề phát sinh. Bạn muốn mình tư vấn thêm không ạ?"
+        )
+
+    # Trust / credibility question
+    if any(k in q for k in ["uy tín không", "thợ vớ vẩn", "có tin được không", "chất lượng thế nào"]):
+        return (
+            "Dạ thợ của Fixago đều được xác minh kỹ năng và kinh nghiệm. "
+            "Chi phí được báo rõ trước khi làm, không phát sinh ngoài ý muốn. "
             "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
         )
 
-    except Exception as e:
+    # Safety: dangerous electrical work
+    if any(k in q for k in ["tự tháo", "tự sửa điện", "tóe lửa", "chạm điện"]):
         return (
-            f"Dạ hiện mình chưa lấy được bảng giá do lỗi hệ thống: {e}. "
-            "Bạn có thể để lại thông tin, Fixago sẽ hỗ trợ kiểm tra và báo giá rõ ràng trước khi làm ạ."
+            "Dạ tình trạng này khá nguy hiểm — bạn nên ngắt cầu dao điện trước, "
+            "tránh tự tháo nếu chưa có kinh nghiệm. Fixago có thể cử thợ điện đến kiểm tra an toàn. "
+            "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
         )
 
-
-def handle_get_promotions(messages, used_tools):
-    used_tools.append("Thực thi Tool [Backend API]: Lấy danh sách ưu đãi (GET /discounts/available)...")
-    api_context = "[KẾT QUẢ TỪ TOOL GET_PROMOTIONS]:\n"
-
-    try:
-        backend_url = os.environ.get("BACKEND_API_URL", "http://127.0.0.1:3001/api/v1")
-        resp = requests.get(f"{backend_url}/discounts/available", timeout=3)
-
-        if resp.status_code == 200:
-            # Backend returns a plain array (no { data: [] } wrapper)
-            raw = resp.json()
-            promos = raw if isinstance(raw, list) else raw.get("data", [])
-            if promos:
-                for p in promos:
-                    name = p.get("name", "Giảm giá")
-                    api_context += f"- Khuyến mãi '{name}': "
-                    if p.get("code"):
-                        api_context += f"Mã {p.get('code')}, "
-                    if p.get("discountType") == 1:
-                        api_context += f"giảm {p.get('discountValue', 0)}%"
-                        if p.get("maxDiscountAmount"):
-                            api_context += f" tối đa {p.get('maxDiscountAmount')} VNĐ"
-                    else:
-                        api_context += f"giảm {p.get('discountValue', 0)} VNĐ"
-                    api_context += ".\n"
-            else:
-                api_context += "Hiện tại chưa có chương trình khuyến mãi nào."
-        else:
-            api_context += "Hiện tại không lấy được thông tin khuyến mãi."
-    except Exception as e:
-        api_context += f"Lỗi gọi Backend API: {e}"
-
-    instruction = (
-        "Hãy thông báo kết quả này cho người dùng một cách hấp dẫn, tự nhiên và chân thành. "
-        "Nếu chưa có khuyến mãi, nói nhẹ nhàng và mời khách mô tả nhu cầu để Fixago tư vấn dịch vụ phù hợp."
-    )
-    return run_second_llm(messages, api_context, instruction)
-
-
-def resolve_service_id(description):
-    """
-    Fetch a real serviceId from the backend that matches the booking description.
-    Backend requires at least one detail in POST /bookings — never return None.
-    Strategy:
-      1. Search by description keyword (normalized group key)
-      2. If no match, fall back to first active service in the system
-    Returns (serviceId, serviceGroupId).
-    Raises RuntimeError if backend is completely unreachable.
-    """
-    backend_url = os.environ.get("BACKEND_API_URL", "http://127.0.0.1:3001/api/v1")
-    search_key = normalize_service_search(description)
-
-    try:
-        # Step 1: search by keyword
-        resp = requests.get(
-            f"{backend_url}/services",
-            params={"search": search_key, "limit": 1, "isActive": True},
-            timeout=3
-        )
-        if resp.status_code == 200:
-            data = resp.json().get("data", [])
-            if data:
-                return data[0].get("id"), data[0].get("serviceGroupId")
-
-        # Step 2: fallback — any active service
-        resp2 = requests.get(
-            f"{backend_url}/services",
-            params={"limit": 1, "isActive": True},
-            timeout=3
-        )
-        if resp2.status_code == 200:
-            data2 = resp2.json().get("data", [])
-            if data2:
-                print(f"resolve_service_id: no match for '{search_key}', using fallback service id={data2[0].get('id')}")
-                return data2[0].get("id"), data2[0].get("serviceGroupId")
-
-    except Exception as e:
-        print(f"resolve_service_id failed: {e}")
-
-    raise RuntimeError("Không thể lấy thông tin dịch vụ từ hệ thống để tạo đơn.")
-
-
-def handle_create_booking(answer, used_tools):
-    desc_match = re.search(r'description="([^"]*)"', answer)
-    name_match = re.search(r'name="([^"]*)"', answer)
-    phone_match = re.search(r'phone="([^"]*)"', answer)
-    addr_match = re.search(r'address="([^"]*)"', answer)
-
-    desc = desc_match.group(1).strip() if desc_match else "Khách hàng yêu cầu thợ đến kiểm tra"
-    name = name_match.group(1).strip() if name_match else "Khách hàng"
-    phone = phone_match.group(1).strip() if phone_match else ""
-    address = addr_match.group(1).strip() if addr_match else "Chưa cung cấp"
-
-    used_tools.append(f'Thực thi Tool [Backend API]: Tạo đơn đặt lịch cho "{name}", sđt "{phone}", địa chỉ "{address}" với lỗi "{desc}"...')
-
-    api_context = "[KẾT QUẢ TỪ TOOL CREATE_BOOKING]:\n"
-
-    if not phone:
-        return "Dạ mình còn thiếu số điện thoại để tạo lịch. Bạn cho mình xin số điện thoại liên hệ nhé."
-
-    try:
-        backend_url = os.environ.get("BACKEND_API_URL", "http://127.0.0.1:3001/api/v1")
-
-        # Resolve a real serviceId — backend requires at least 1 detail
-        service_id, _ = resolve_service_id(desc)
-        booking_payload = {
-            "guestPhone": phone,
-            "contactName": name,
-            "contactPhone": phone,
-            "address": {
-                "addressLine": address
-            },
-            "priority": 0,
-            "customerNote": desc,
-            "details": [{"serviceId": service_id, "quantity": 1}]
-        }
-
-        resp = requests.post(f"{backend_url}/bookings", json=booking_payload, timeout=5)
-
-        if resp.status_code in [200, 201]:
-            bdata = resp.json()
-            booking_code = bdata.get("bookingCode", "N/A")
-            api_context += f"OK:{booking_code}"
-        else:
-            api_context += f"ERR:{resp.text[:200]}"
-    except Exception as e:
-        api_context += f"ERR:{e}"
-
-    if api_context.startswith("[KẾT QUẢ TỪ TOOL CREATE_BOOKING]:\nOK:"):
-        booking_code = api_context.split("OK:", 1)[1].strip()
+    # Business hours
+    if any(k in q for k in ["mấy giờ", "giờ làm việc", "ban đêm", "working hour", "open"]):
         return (
-            f"Đặt lịch thành công rồi ạ! "
-            f"Mã đơn: {booking_code}. "
-            f"Khách hàng: {name} | SĐT: {phone} | Địa chỉ: {address}. "
-            f"Vấn đề: {desc}. "
-            f"Thợ Fixago sẽ liên hệ sớm để hỗ trợ bạn nhé."
+            "Dạ mình chưa có thông tin chính xác về giờ làm việc của Fixago. "
+            "Sau khi đặt lịch, thợ sẽ liên hệ xác nhận thời gian phù hợp với bạn nhé."
         )
 
-    err = api_context.split("ERR:", 1)[1].strip() if "ERR:" in api_context else api_context
-    return f"Xin lỗi, hiện mình không thể tạo đơn lúc này. Lỗi: {err}"
+    # Payment method
+    if any(k in q for k in ["tiền mặt", "chuyển khoản", "thanh toán", "payment", "pay"]):
+        return (
+            "Dạ mình chưa có thông tin đầy đủ về phương thức thanh toán. "
+            "Bạn có thể hỏi trực tiếp thợ khi họ liên hệ xác nhận lịch nhé."
+        )
+
+    # VAT / invoice
+    if any(k in q for k in ["hóa đơn", "vat", "invoice", "xuất hóa đơn"]):
+        return (
+            "Dạ mình chưa có thông tin về việc xuất hóa đơn VAT. "
+            "Bạn có thể liên hệ trực tiếp Fixago để được hỗ trợ cụ thể nhé."
+        )
+
+    # Service area
+    if any(k in q for k in ["cần thơ", "đà nẵng", "da nang", "hà nội", "hải phòng",
+                              "khu vực", "tỉnh", "vùng", "area", "support", "region"]):
+        return (
+            "Dạ mình chưa có thông tin đầy đủ về khu vực hoạt động. "
+            "Bạn để lại địa chỉ, Fixago sẽ kiểm tra và xác nhận có hỗ trợ được không nhé."
+        )
+
+    # Warranty — skip if query also asks for price (tool will handle that, mention warranty in passing)
+    if not _has_price_intent and any(k in q for k in ["bảo hành", "warranty", "guarantee"]):
+        return (
+            "Dạ thông tin bảo hành phụ thuộc vào từng hạng mục. "
+            "Thợ sẽ trao đổi cụ thể với bạn khi đến kiểm tra nhé. "
+            "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
+        )
+
+    # Delivery time / ETA
+    if (any(k in q for k in ["bao lâu thợ tới", "thợ tới lúc nào", "khi nào thợ đến",
+                               "how long", "how soon"])
+            or re.search(r'\beta\b', q)):
+        return (
+            "Dạ thời gian thợ đến phụ thuộc vào lịch và khu vực. "
+            "Sau khi đặt lịch, hệ thống sẽ xác nhận thời gian cụ thể với bạn nhé."
+        )
+
+    # Technician selection
+    if any(k in q for k in ["chọn thợ", "thợ cụ thể", "thợ quen", "choose technician"]):
+        return (
+            "Dạ hiện tại Fixago sẽ điều phối thợ phù hợp nhất với yêu cầu và khu vực của bạn. "
+            "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
+        )
+
+    # Urgent / 5 minutes
+    if any(k in q for k in ["ngay lập tức", "trong 5 phút", "ngay bây giờ", "cấp cứu", "urgent"]):
+        return (
+            "Dạ Fixago điều phối theo lịch — mình không thể đảm bảo thợ đến ngay trong vài phút. "
+            "Bạn đặt lịch để Fixago liên hệ sắp xếp sớm nhất có thể nhé?"
+        )
+
+    # Package tiers
+    if any(k in q for k in ["gói tiết kiệm", "gói tiêu chuẩn", "gói cao cấp", "package"]):
+        return (
+            "Dạ hiện Fixago tính giá theo từng hạng mục dịch vụ thực tế, "
+            "không có gói cố định. Thợ sẽ báo giá rõ trước khi làm nhé."
+        )
+
+    # Identity
+    if any(k in q for k in ["bạn là ai", "who are you", "bạn là gì", "tên bạn là gì"]):
+        return (
+            "Dạ mình là Trợ lý AI của Fixago — nền tảng đặt thợ sửa chữa điện, nước, "
+            "điện lạnh, xây dựng và thạch cao tại nhà. Bạn cần hỗ trợ gì không ạ?"
+        )
+
+    # Technician quality / training
+    # Don't fire if query also has a price/promo intent (will be handled by tool)
+    if not _has_price_intent and any(k in q for k in [
+        "đào tạo không", "thợ được đào tạo", "thợ có kinh nghiệm",
+        "thợ chuyên nghiệp", "tay nghề", "kỹ năng thợ", "thợ có giỏi",
+        "trained technician", "skilled",
+    ]):
+        return (
+            "Dạ thợ của Fixago đều qua kiểm tra kỹ năng và xác minh kinh nghiệm thực tế trước khi nhận việc. "
+            "Không phải thợ tự do ngẫu nhiên — mỗi thợ được đánh giá và theo dõi chất lượng sau từng đơn. "
+            "Bạn muốn mình tư vấn thêm hoặc hỗ trợ đặt lịch không ạ?"
+        )
+
+    # Complaint / after-service support
+    if any(k in q for k in ["khiếu nại", "không hài lòng", "thợ làm sai", "làm không tốt",
+                              "làm hỏng", "sửa không được", "complain", "refund", "hoàn tiền",
+                              "đền bù", "trách nhiệm", "phản ánh"]):
+        return (
+            "Dạ nếu bạn chưa hài lòng sau khi thợ làm, bạn có thể phản ánh trực tiếp qua ứng dụng Fixago "
+            "hoặc liên hệ bộ phận hỗ trợ. Fixago sẽ xem xét và có phương án xử lý phù hợp với từng trường hợp. "
+            "Bạn muốn mình hỗ trợ gì thêm không ạ?"
+        )
+
+    # Comparison with competitors / street technicians
+    # Don't fire if there's also a promo or price query — let tool handle that part first
+    if not _has_promo_intent and any(k in q for k in [
+        "khác với", "khác gì", "hơn gì", "tốt hơn", "so với",
+        "so sánh", "compare", "better than", "different from",
+        "app khác", "dịch vụ khác", "nền tảng khác", "rẻ hơn",
+    ]):
+        return (
+            "Dạ so với tìm thợ tự do hoặc app khác, Fixago khác biệt ở 3 điểm: "
+            "① Thợ được xác minh kỹ năng và lịch sử làm việc trước khi nhận đơn. "
+            "② Báo giá rõ ràng trước khi thợ bắt tay vào làm — không phát sinh ngoài ý muốn. "
+            "③ Hỗ trợ sau dịch vụ nếu có vấn đề phát sinh. "
+            "Bạn muốn mình tư vấn thêm hoặc đặt lịch không ạ?"
+        )
+
+    # Introduction / what is Fixago
+    if any(k in q for k in ["fixago là gì", "fixago là ai", "giới thiệu fixago",
+                              "fixago hoạt động", "fixago làm gì", "công ty fixago",
+                              "about fixago", "what is fixago", "tell me about fixago"]):
+        return (
+            "Dạ Fixago là nền tảng đặt thợ sửa chữa nhà uy tín — kết nối bạn với thợ điện, nước, "
+            "điện lạnh, xây dựng và thạch cao đã được xác minh. "
+            "Chỉ cần mô tả sự cố, Fixago điều phối thợ phù hợp, báo giá rõ trước khi làm, "
+            "và hỗ trợ sau dịch vụ nếu cần. Bạn đang cần hỗ trợ hạng mục nào ạ?"
+        )
+
+    # Off-topic
+    if any(k in q for k in ["nấu phở", "tình yêu", "love poem", "thơ tình", "bài thơ",
+                              "nấu ăn", "recipe", "cooking", "bóng đá", "football"]):
+        return (
+            "Dạ mình chỉ hỗ trợ về dịch vụ sửa chữa nhà của Fixago thôi ạ 😊 "
+            "Bạn có cần tư vấn sửa chữa điện, nước, máy lạnh hay xây dựng không?"
+        )
+
+    # Consultation-only: user explicitly says they just want advice, not booking
+    if any(k in q for k in ["chỉ hỏi", "hỏi thôi", "tư vấn thôi", "chỉ muốn hỏi",
+                              "không muốn đặt", "chưa muốn đặt"]):
+        # Route to price/service info if service keyword present
+        return ""  # let normal routing handle; negation guard prevents booking
+
+    # Ambiguous "cái này" / "nhìn giúp" — can't price without details
+    if any(k in q for k in ["cái này", "nhìn giúp", "xem giúp", "xem cái này"]):
+        return (
+            "Dạ mình cần biết tình trạng cụ thể để tư vấn chi phí. "
+            "Bạn mô tả lỗi hoặc hạng mục cần sửa để mình tư vấn nhé?"
+        )
+
+    # Short ambiguous "Hỏng rồi" / general damage statement with no service mentioned
+    _DAMAGE_WORDS = ["hỏng rồi", "hỏng hết", "bị hỏng", "hư rồi", "hư hết"]
+    _SERVICE_WORDS = ["điện", "nước", "máy lạnh", "máy giặt", "ống", "vòi", "chập",
+                      "rò", "nghẹt", "thạch cao", "sơn", "xây"]
+    if any(k in q for k in _DAMAGE_WORDS) and not any(s in q for s in _SERVICE_WORDS):
+        return (
+            "Dạ bạn cho mình biết thiết bị hay hạng mục nào bị hỏng để mình tư vấn phù hợp nhé? "
+            "(ví dụ: điện, nước, máy lạnh, máy giặt...)"
+        )
+
+    # Single-word "Điện" response during a conversation where service is ambiguous
+    # (handled by routing to price tool if standalone in _detect_tool_intent)
+
+    # Emoji / noisy urgent repair — only fire if no explicit booking intent
+    _ELECTRIC_NOISE = ["chập điện", "cháy điện", "tóe lửa", "điện bị", "hở điện"]
+    if not _has_booking_intent and any(k in q for k in _ELECTRIC_NOISE):
+        return (
+            "Dạ tình trạng chập điện cần xử lý ngay. Fixago có thể cử thợ điện đến kiểm tra và sửa an toàn. "
+            "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
+        )
+
+    return ""
 
 
-def repair_booking_tool_call_if_needed(answer, query, history):
-    if "CALL_TOOL" in answer:
-        return answer
+# ── Orchestration ─────────────────────────────────────────────────────────────
 
-    extracted = extract_booking_from_text(answer)
-    if not (extracted.get("name") and extracted.get("phone") and extracted.get("address")):
-        merged = merge_booking_info(query, history)
+def _run_native_tool_path(query: str, history: list, messages: list, used_tools: list) -> str:
+    """Native function-calling path (cheese-server --jinja required)."""
+    booking_resp = build_booking_response(query, history)
+
+    if booking_resp and "CALL_TOOL: create_booking" in booking_resp:
+        return handle_create_booking(booking_resp, used_tools)
+
+    if booking_resp and "CALL_TOOL" not in booking_resp:
+        return booking_resp
+
+    tool_name, tool_result, raw_msg = llm_chat_with_tools(messages, temperature=0.0)
+
+    if tool_name == "get_groups":
+        messages.append({"role": "assistant", "content": None, "tool_calls": raw_msg.get("tool_calls")})
+        return handle_get_groups(messages, used_tools)
+
+    if tool_name == "get_services":
+        search = normalize_service_search(tool_result.get("search", ""))
+        messages.append({"role": "assistant", "content": None, "tool_calls": raw_msg.get("tool_calls")})
+        return handle_get_services(search, messages, used_tools)
+
+    if tool_name == "get_promotions":
+        messages.append({"role": "assistant", "content": None, "tool_calls": raw_msg.get("tool_calls")})
+        return handle_get_promotions(messages, used_tools)
+
+    if tool_name == "create_booking":
+        if detect_confirmation(query):
+            n, p, a, d = (
+                tool_result.get("name", ""),
+                tool_result.get("phone", ""),
+                tool_result.get("address", ""),
+                tool_result.get("description", ""),
+            )
+            fake = f'CALL_TOOL: create_booking(name="{n}", phone="{p}", address="{a}", description="{d}")'
+            return handle_create_booking(fake, used_tools)
+
+        # All fields present but not confirmed — show summary
+        info = merge_booking_info(query, history)
+        info.update({k: v for k, v in tool_result.items() if v})
+        return (
+            f"Tên: {info.get('name') or tool_result.get('name', '?')}\n"
+            f"SĐT: {info.get('phone') or tool_result.get('phone', '?')}\n"
+            f"Địa chỉ: {info.get('address') or tool_result.get('address', '?')}\n"
+            f"Vấn đề: {info.get('issue') or tool_result.get('description', '?')}\n"
+            "Bạn xác nhận đặt lịch với thông tin này nhé?"
+        )
+
+    # No tool call — plain text reply
+    return tool_result
+
+
+def _detect_multi_service(query: str, first_tool: str, messages: list, used_tools: list):
+    """
+    If the query mentions two different service categories, call both APIs and
+    return a combined answer string directly (not a CALL_TOOL token).
+    Otherwise return first_tool unchanged.
+    """
+    q = _normalize_noaccent((query or "").lower())
+    service_map = {
+        "điện":     ["điện", "chập", "ổ cắm", "bóng đèn", "công tắc", "aptomat", "dây điện"],
+        "nước":     ["nước", "ống", "rò", "nghẹt", "vòi", "bồn cầu", "máy bơm", "lavabo"],
+        "máy lạnh": ["máy lạnh", "điều hòa", "tủ lạnh", "không lạnh", "máy giặt"],
+        "xây dựng": ["sơn", "chống thấm", "ốp lát", "tường", "ban công", "xây dựng", "dột"],
+        "thạch cao":["thạch cao", "trần", "vách ngăn"],
+    }
+    matched = []
+    for key, kws in service_map.items():
+        if any(kw in q for kw in kws):
+            matched.append(key)
+
+    if len(matched) < 2:
+        return first_tool  # single or zero service → normal path
+
+    # Avoid false multi-service on compound phrases like "máy giặt bị rò nước"
+    # or contact-info messages like "Tôi tên An, sđt 0909111222, ở 45 Trần Phú. Máy giặt bị rò"
+    # Require an explicit price/question connector between service mentions
+    _MULTI_SEPARATORS = [" còn ", " và giá ", " với giá ", " or ", " and ",
+                         "bao nhiêu,", "bao nhiêu còn", "giá còn"]
+    if not any(sep in q for sep in _MULTI_SEPARATORS):
+        return first_tool  # single compound phrase, not a real multi-service query
+
+    # Fetch both services and stitch responses
+    parts = []
+    for svc in matched[:2]:
+        result = handle_get_services(svc, messages, used_tools)
+        # Extract just the price line(s) to keep it concise
+        lines = [l for l in result.split("\n") if l.strip() and "muốn mình" not in l]
+        parts.append(f"**{svc.title()}:** " + " ".join(lines[:3]))
+
+    combined = "\n\n".join(parts) + "\n\nChi phí thực tế thợ sẽ báo rõ trước khi làm. Bạn muốn mình hỗ trợ đặt lịch không ạ?"
+    return combined  # return final string, not CALL_TOOL token
+
+
+def _run_legacy_tool_path(query: str, history: list, messages: list, used_tools: list) -> str:
+    """Legacy text-based tool detection path (no --jinja needed)."""
+
+    # Tool intent takes priority over booking when not negated
+    forced_tool = _detect_tool_intent(query)
+
+    # Multi-service query: user asks about two different services in one message
+    # e.g. "giá máy lạnh bao nhiêu, còn giá sửa ống nước thì sao?"
+    forced_tool = _detect_multi_service(query, forced_tool, messages, used_tools)
+
+    # Static fallback short-circuits everything (policy/safety/identity/off-topic)
+    static_early = _static_fallback(query)
+    if static_early:
+        return static_early
+
+    # Booking path — skip if user negated intent or a tool will handle it
+    # A price/service query takes precedence over booking flow inheritance
+    _has_service_tool = forced_tool and "get_services" in str(forced_tool)
+    if not detect_negation(query) and not _has_service_tool:
+        booking_resp = build_booking_response(query, history)
+        import sys; print(f"[DEBUG] query={query!r} booking_resp={repr(booking_resp)[:100]} history_len={len(history)}", file=sys.stderr)
     else:
-        merged = extracted
+        booking_resp = None
 
-    if merged.get("name") and merged.get("phone") and merged.get("address"):
-        if detect_confirmation(query) or detect_booking_intent(query):
-            name = merged.get("name")
-            phone = merged.get("phone")
-            address = merged.get("address")
-            issue = merged.get("issue") or query
-            return f'CALL_TOOL: create_booking(name="{name}", phone="{phone}", address="{address}", description="{issue}")'
+    # Decide priority: booking CALL_TOOL > promo/groups > booking text > price tool > LLM
+    # Promotion/groups tool always wins over booking (user asking info, not booking)
+    promo_or_groups = forced_tool and any(t in forced_tool for t in ["get_promotions", "get_groups"])
+
+    # If _detect_multi_service already resolved to a final string, use it directly
+    if forced_tool and not forced_tool.startswith("CALL_TOOL:"):
+        return forced_tool
+
+    if booking_resp and "CALL_TOOL: create_booking" in booking_resp:
+        # Confirmed booking execution — highest priority
+        answer = booking_resp
+    elif promo_or_groups:
+        # Promotion/groups query — always dispatch, even mid-booking
+        answer = forced_tool
+    elif booking_resp:
+        # Booking flow in progress (asking for info or showing summary)
+        answer = booking_resp
+    elif forced_tool:
+        answer = forced_tool
+    else:
+        grammar = load_grammar("fixago_tool_call.gbnf")
+        answer  = llm_chat(messages, temperature=0.0, grammar=grammar)
+
+    answer = repair_booking_tool_call(answer, query, history)
+
+    if "CALL_TOOL: get_groups" in answer:
+        messages.append({"role": "assistant", "content": answer})
+        return handle_get_groups(messages, used_tools)
+
+    if "CALL_TOOL: get_services" in answer:
+        m      = re.search(r'search="([^"]*)"', answer)
+        search = normalize_service_search(m.group(1) if m else "")
+        messages.append({"role": "assistant", "content": answer})
+        svc_result = handle_get_services(search, messages, used_tools)
+        # Append warranty note if query also asked about it
+        q_low = (query or "").lower()
+        if any(k in q_low for k in ["bảo hành", "warranty", "guarantee"]):
+            svc_result = svc_result.rstrip() + "\n\nVề bảo hành: thông tin cụ thể phụ thuộc từng hạng mục, thợ sẽ trao đổi rõ khi đến kiểm tra."
+        # Append comparison note if query compares with competitors
+        if any(k in q_low for k in ["rẻ hơn", "so với", "so sánh", "tốt hơn", "thợ tự do", "compare"]):
+            svc_result = svc_result.rstrip() + "\nThợ Fixago đã được xác minh kỹ năng, báo giá minh bạch trước khi làm — không lo phát sinh."
+        return svc_result
+
+    if "CALL_TOOL: get_promotions" in answer:
+        messages.append({"role": "assistant", "content": answer})
+        promo_result = handle_get_promotions(messages, used_tools)
+        # Append comparison note if query also asks about price vs competitors
+        q_low = (query or "").lower()
+        if any(k in q_low for k in ["rẻ hơn", "so với", "tốt hơn", "thợ tự do", "compare", "cheaper"]):
+            promo_result = promo_result.rstrip() + "\n\nVề chi phí so với thợ tự do: Fixago báo giá minh bạch trước khi làm, thợ đã được xác minh — không lo phát sinh chi phí ngoài ý muốn."
+        return promo_result
+
+    if "create_booking" in answer.lower():
+        return handle_create_booking(answer, used_tools)
 
     return answer
 
+
+# ── Flask routes ──────────────────────────────────────────────────────────────
 
 @app.route("/", methods=["GET"])
 def index():
@@ -748,258 +679,145 @@ def index():
 
 @app.route("/api/v1/rag/ingest", methods=["POST"])
 def ingest():
-    data = request.json or {}
+    data   = request.json or {}
     doc_id = data.get("doc_id")
-    text = data.get("text")
-
+    text   = data.get("text")
     if doc_id is None or not text:
         return jsonify({"status": "error", "message": "Missing 'doc_id' or 'text'"}), 400
-
     try:
         rag_engine.ingest_document(int(doc_id), text)
-        return jsonify({
-            "status": "success",
-            "message": f"Document {doc_id} ingested successfully"
-        })
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({"status": "success", "message": f"Document {doc_id} ingested successfully"})
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 500
 
 
 @app.route("/api/v1/rag/retrieve", methods=["POST"])
 def retrieve():
-    data = request.json or {}
+    data  = request.json or {}
     query = data.get("query")
     top_k = data.get("top_k", 5)
-
     if not query:
         return jsonify({"status": "error", "message": "Missing 'query'"}), 400
-
     try:
-        norm_query = rag_engine.normalize_query(query)
-        context = rag_engine.retrieve_context(norm_query, top_k=int(top_k))
+        context = rag_engine.retrieve_context(rag_engine.normalize_query(query), top_k=int(top_k))
         return jsonify({"status": "success", "context": context})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 500
 
 
 @app.route("/api/v1/rag/query", methods=["POST"])
 def query_rag():
-    data = request.json or {}
-    query = data.get("query")
-    use_cache = data.get("use_cache", True)
+    data      = request.json or {}
+    query     = data.get("query")
+    use_cache = data.get("use_cache", False)
     session_id = data.get("session_id")
 
     if not query:
         return jsonify({"status": "error", "message": "Missing 'query'"}), 400
 
-    if is_prompt_injection(query):
-        return jsonify(guardrail_response())
+    if _is_prompt_injection(query):
+        return jsonify(_guardrail_response())
 
     try:
+        # ── Session ──────────────────────────────────────────────────────────
         if not session_id:
             session_id = str(uuid.uuid4())
-            
-        session_data = SessionManager.get_session(session_id)
-        
-        client_history = compact_history(data.get("history", []))
-        if client_history and not session_data.get("history"):
-            session_data["history"] = client_history
-            
-        history = session_data.get("history", [])
 
-        system_prompt = data.get("system_prompt", load_system_prompt())
-        safe_system = build_safe_system(system_prompt)
-        
-        booking_state = session_data.get("booking_state", {})
-        state_text = (
-            f"SESSION_STATE:\n"
-            f"- Tên: {booking_state.get('name') or 'Chưa có'}\n"
-            f"- SĐT: {booking_state.get('phone') or 'Chưa có'}\n"
-            f"- Địa chỉ: {booking_state.get('address') or 'Chưa có'}\n"
-            f"- Vấn đề: {booking_state.get('issue') or 'Chưa có'}\n\n"
-        )
-        safe_system = safe_system.replace("EXAMPLES:\n", state_text + "EXAMPLES:\n")
+        session   = SessionManager.get(session_id)
+        client_h  = _compact_history(data.get("history", []))
+        if client_h and not session.get("history"):
+            session["history"] = client_h
+        history   = session.get("history", [])
 
-        db_context = ""
+        # ── System prompt ─────────────────────────────────────────────────────
+        base_prompt = data.get("system_prompt", _load_system_prompt())
+        system      = _build_system_prompt(base_prompt, session.get("booking_state", {}))
+
+        # ── RAG context ───────────────────────────────────────────────────────
+        rag_context = ""
         try:
-            norm_query = rag_engine.normalize_query(query)
-            db_context = rag_engine.retrieve_context(norm_query, top_k=3)
-        except Exception as e:
-            print(f"RAG retrieval failed: {e}")
+            rag_context = rag_engine.retrieve_context(rag_engine.normalize_query(query), top_k=3)
+        except Exception as exc:
+            print(f"RAG retrieval failed: {exc}")
 
-        context = db_context.strip()
-
-        history_text = history_to_text(history)
-        prompt_for_cache = (
-            f"System: {safe_system}\n"
-            f"History:\n{history_text}\n"
-            f"Context:\n{context}\n"
-            f"Question:\n{query}"
+        # ── Cache key ─────────────────────────────────────────────────────────
+        history_text = "\n".join(
+            f"{m.get('role')}: {m.get('content', '')}"
+            for m in _compact_history(history)
         )
-
-        tokens = rag_engine.tokenize_text(prompt_for_cache)
-        prompt_hash = hashlib.sha256(prompt_for_cache.encode("utf-8")).hexdigest()
-        cache_key = f"pomai_cache:response:{prompt_hash}"
+        cache_seed = f"System:{system}\nHistory:{history_text}\nContext:{rag_context}\nQ:{query}"
+        tokens     = []
+        cache_key  = ""
 
         if use_cache:
             try:
-                with rag_engine.rag_lock:
-                    cached_val = rag_engine.cache.get(cache_key)
-                    p_get_res = rag_engine.cache.prompt_get(tokens) if cached_val else None
-
-                if cached_val:
+                tokens    = rag_engine.tokenize_text(cache_seed)
+                cache_key = f"pomai_cache:response:{hashlib.sha256(cache_seed.encode()).hexdigest()}"
+                cached = rag_engine.cache.get(cache_key)
+                p_res  = rag_engine.cache.prompt_get(tokens) if cached else None
+                if cached:
                     return jsonify({
                         "status": "success",
-                        "response": cached_val.decode("utf-8"),
+                        "response": cached.decode("utf-8"),
                         "source": "cache",
                         "tool_calls": [],
-                        "cache_metrics": p_get_res or {
-                            "hit": True,
-                            "cached_tokens": len(tokens),
-                            "savings_ratio": 1.0
-                        }
+                        "cache_metrics": p_res or {
+                            "hit": True, "cached_tokens": len(tokens), "savings_ratio": 1.0
+                        },
                     })
-            except Exception as e:
-                print(f"Cache lookup failed: {e}")
+            except Exception as exc:
+                print(f"Cache lookup failed: {exc}")
 
-        messages = [{"role": "system", "content": safe_system}]
+        # ── Build messages ────────────────────────────────────────────────────
+        messages = [{"role": "system", "content": system}]
         messages.extend(history)
+        messages.append({
+            "role": "user",
+            "content": (
+                f"Ngữ cảnh tham khảo:\n{rag_context}\n\nCâu hỏi của khách:\n{query}"
+                if rag_context else query
+            ),
+        })
 
-        if context:
-            user_msg = (
-                "Ngữ cảnh tham khảo:\n"
-                f"{context}\n\n"
-                "Câu hỏi của khách:\n"
-                f"{query}"
-            )
-        else:
-            user_msg = query
+        # ── Orchestrate ───────────────────────────────────────────────────────
+        used_tools: list = []
+        answer = (
+            _run_native_tool_path(query, history, messages, used_tools)
+            if ENABLE_NATIVE_TOOL_CALL
+            else _run_legacy_tool_path(query, history, messages, used_tools)
+        )
 
-        messages.append({"role": "user", "content": user_msg})
+        # ── Persist session ───────────────────────────────────────────────────
+        session["history"].append({"role": "user",      "content": query})
+        session["history"].append({"role": "assistant", "content": answer})
+        session["history"]       = _compact_history(session["history"], max_items=12)
+        session["booking_state"] = merge_booking_info(query, session["history"])
+        SessionManager.save(session_id, session)
 
-        used_tools = []
-
-        if ENABLE_NATIVE_TOOL_CALL:
-            # ── Native function calling path (cheese-server --jinja) ──────────
-            # Rule-based pre-empt for booking confirmation (stateful, needs context)
-            booking_response = maybe_build_booking_response(query, history)
-            if booking_response and "CALL_TOOL: create_booking" in booking_response:
-                # Already have all info + confirmation → bypass LLM, call directly
-                answer = handle_create_booking(booking_response, used_tools)
-            elif booking_response and "CALL_TOOL" not in booking_response:
-                # Collecting info / asking missing fields — use text response directly
-                answer = booking_response
-            else:
-                # Let the model decide which tool to call (or reply normally)
-                tool_name, tool_result, raw_message = llm_chat_with_tools(
-                    messages, temperature=0.0, timeout=300
-                )
-
-                if tool_name == "get_groups":
-                    messages.append({"role": "assistant", "content": None, "tool_calls": raw_message.get("tool_calls")})
-                    answer = handle_get_groups(messages, used_tools)
-
-                elif tool_name == "get_services":
-                    search = tool_result.get("search", "")
-                    # Inject the parsed search arg into a fake CALL_TOOL string
-                    # so handle_get_services can parse it (reuse existing handler)
-                    fake_answer = f'CALL_TOOL: get_services(search="{search}")'
-                    messages.append({"role": "assistant", "content": None, "tool_calls": raw_message.get("tool_calls")})
-                    answer = handle_get_services(fake_answer, messages, used_tools)
-
-                elif tool_name == "get_promotions":
-                    messages.append({"role": "assistant", "content": None, "tool_calls": raw_message.get("tool_calls")})
-                    answer = handle_get_promotions(messages, used_tools)
-
-                elif tool_name == "create_booking":
-                    # Double-check confirmation before booking
-                    if detect_confirmation(query):
-                        name = tool_result.get("name", "")
-                        phone = tool_result.get("phone", "")
-                        address = tool_result.get("address", "")
-                        description = tool_result.get("description", "")
-                        fake_answer = f'CALL_TOOL: create_booking(name="{name}", phone="{phone}", address="{address}", description="{description}")'
-                        answer = handle_create_booking(fake_answer, used_tools)
-                    else:
-                        # Model wanted to book but no confirmation — show summary
-                        info = merge_booking_info(query, history)
-                        info.update({k: v for k, v in tool_result.items() if v})
-                        answer = (
-                            f"Tên: {info.get('name') or tool_result.get('name', '?')}\n"
-                            f"SĐT: {info.get('phone') or tool_result.get('phone', '?')}\n"
-                            f"Địa chỉ: {info.get('address') or tool_result.get('address', '?')}\n"
-                            f"Vấn đề: {info.get('issue') or tool_result.get('description', '?')}\n"
-                            "Bạn xác nhận đặt lịch với thông tin này nhé?"
-                        )
-
-                else:
-                    # Model replied with text (no tool call)
-                    answer = tool_result
-
-        else:
-            # ── Legacy text-based tool detection path (no --jinja needed) ─────
-            booking_response = maybe_build_booking_response(query, history)
-            forced_tool = detect_tool_intent(query)
-
-            if booking_response:
-                answer = booking_response
-            elif forced_tool:
-                answer = forced_tool
-            else:
-                # Use GBNF grammar to constrain output to either tool call or text
-                # This prevents model from hallucinating tool call format
-                grammar = load_grammar("fixago_tool_call.gbnf") if not ENABLE_NATIVE_TOOL_CALL else ""
-                answer = llm_chat(messages, temperature=0.0, timeout=300, grammar=grammar)
-
-            answer = repair_booking_tool_call_if_needed(answer, query, history)
-
-            if "CALL_TOOL: get_groups" in answer:
-                messages.append({"role": "assistant", "content": answer})
-                answer = handle_get_groups(messages, used_tools)
-
-            elif "CALL_TOOL: get_services" in answer:
-                messages.append({"role": "assistant", "content": answer})
-                answer = handle_get_services(answer, messages, used_tools)
-
-            elif "CALL_TOOL: get_promotions" in answer:
-                messages.append({"role": "assistant", "content": answer})
-                answer = handle_get_promotions(messages, used_tools)
-
-            elif "create_booking" in answer.lower():
-                answer = handle_create_booking(answer, used_tools)
-
-        session_data["history"].append({"role": "user", "content": query})
-        session_data["history"].append({"role": "assistant", "content": answer})
-        session_data["history"] = compact_history(session_data["history"], max_items=12)
-        session_data["booking_state"] = merge_booking_info(query, session_data["history"])
-        SessionManager.save_session(session_id, session_data)
-
+        # ── Write cache ───────────────────────────────────────────────────────
         if use_cache:
             try:
-                with rag_engine.rag_lock:
-                    rag_engine.cache.set(cache_key, answer.encode("utf-8"), ttl_ms=600000)
-                    rag_engine.cache.prompt_put(tokens, answer.encode("utf-8"), ttl_ms=600000)
-            except Exception as e:
-                print(f"Cache write failed: {e}")
+                if not cache_key:
+                    tokens    = rag_engine.tokenize_text(cache_seed)
+                    cache_key = f"pomai_cache:response:{hashlib.sha256(cache_seed.encode()).hexdigest()}"
+                rag_engine.cache.set(cache_key, answer.encode("utf-8"), ttl_ms=600_000)
+                rag_engine.cache.prompt_put(tokens, answer.encode("utf-8"), ttl_ms=600_000)
+            except Exception as exc:
+                print(f"Cache write failed: {exc}")
 
         return jsonify({
             "status": "success",
             "response": answer,
             "source": "llm",
             "tool_calls": used_tools,
-            "cache_metrics": {
-                "hit": False,
-                "cached_tokens": 0,
-                "savings_ratio": 0.0
-            }
+            "cache_metrics": {"hit": False, "cached_tokens": 0, "savings_ratio": 0.0},
         })
 
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": f"LLM query failed: {e}"
-        }), 500
+    except Exception as exc:
+        return jsonify({"status": "error", "message": f"LLM query failed: {exc}"}), 500
 
+
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     port = int(os.environ.get("RAG_PORT", 8081))

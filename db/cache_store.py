@@ -1,0 +1,104 @@
+"""
+db/cache_store.py
+-----------------
+PomaiCache wrapper: key-value cache and prompt-token cache.
+Handles tokenization via the cheesebrain /tokenize endpoint.
+"""
+import logging
+import os
+from pathlib import Path
+from typing import Any, List, Optional
+
+import requests
+
+logger = logging.getLogger("fixago.cache_store")
+
+# ── Paths & config ───────────────────────────────────────────────────────────
+
+workspace_dir     = Path(os.environ.get("RAG_WORKSPACE_DIR", Path(__file__).resolve().parent.parent)).resolve()
+data_dir          = Path(os.environ.get("RAG_DATA_DIR",      workspace_dir / "data")).resolve()
+pomaicache_dir    = Path(os.environ.get("POMAICACHE_DIR",    data_dir / "pomaicache")).resolve()
+pomaicache_build_dir = Path(os.environ.get("POMAICACHE_BUILD_DIR", workspace_dir / "pomaicache" / "build")).resolve()
+
+RAG_CACHE_MEMORY_LIMIT_BYTES = int(os.environ.get("RAG_CACHE_MEMORY_LIMIT_BYTES", str(128 * 1024 * 1024)))
+RAG_TOKENIZER_URL            = os.environ.get("RAG_TOKENIZER_URL",     "http://127.0.0.1:8080/tokenize")
+RAG_TOKENIZER_TIMEOUT        = float(os.environ.get("RAG_TOKENIZER_TIMEOUT", "10"))
+
+
+class CacheStore:
+    """Wraps PomaiCache for key-value and prompt-token caching."""
+
+    def __init__(self, lock):
+        import sys
+        sys.path.insert(0, str(pomaicache_build_dir))
+
+        try:
+            import pomaicache as _pomaicache
+        except Exception as exc:
+            raise RuntimeError(f"Cannot import pomaicache from {pomaicache_build_dir}: {exc}") from exc
+
+        pomaicache_dir.mkdir(parents=True, exist_ok=True)
+
+        self._cache = _pomaicache.Cache(
+            data_dir=str(pomaicache_dir),
+            memory_limit_bytes=RAG_CACHE_MEMORY_LIMIT_BYTES,
+        )
+        self._lock = lock
+        logger.info("PomaiCache initialized at %s", pomaicache_dir)
+
+    # ── Key-value cache ──────────────────────────────────────────────────────
+
+    def get(self, key: str) -> Optional[bytes]:
+        if not key:
+            return None
+        with self._lock:
+            return self._cache.get(key)
+
+    def set(self, key: str, value: bytes, ttl_ms: int = 600_000) -> bool:
+        if not key:
+            return False
+        if not isinstance(value, bytes):
+            value = str(value).encode("utf-8")
+        with self._lock:
+            self._cache.set(key, value, ttl_ms=ttl_ms)
+        return True
+
+    # ── Prompt-token cache ───────────────────────────────────────────────────
+
+    def prompt_get(self, tokens: List[int]) -> Any:
+        if not tokens:
+            return None
+        with self._lock:
+            return self._cache.prompt_get(tokens)
+
+    def prompt_put(self, tokens: List[int], value: bytes, ttl_ms: int = 600_000) -> bool:
+        if not tokens:
+            return False
+        if not isinstance(value, bytes):
+            value = str(value).encode("utf-8")
+        with self._lock:
+            self._cache.prompt_put(tokens, value, ttl_ms=ttl_ms)
+        return True
+
+    # ── Tokenization ─────────────────────────────────────────────────────────
+
+    def tokenize(self, text: Any) -> List[int]:
+        """Tokenize text via cheesebrain /tokenize; fallback to UTF-8 bytes."""
+        safe = str(text or "").strip()
+        if not safe:
+            return []
+        try:
+            resp = requests.post(
+                RAG_TOKENIZER_URL,
+                json={"content": safe},
+                timeout=RAG_TOKENIZER_TIMEOUT,
+            )
+            if resp.status_code == 200:
+                tokens = resp.json().get("tokens", [])
+                if isinstance(tokens, list):
+                    clean = [int(t) for t in tokens if isinstance(t, (int, float))]
+                    if clean:
+                        return clean
+        except Exception as exc:
+            logger.warning("Tokenizer request failed: %s", exc)
+        return list(safe.encode("utf-8"))
