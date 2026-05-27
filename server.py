@@ -296,78 +296,53 @@ def _has_tokens(text: str, *token_groups) -> bool:
 
 def _static_fallback(query: str) -> str:
     """
-    For queries that would fall through to LLM but have predictable answers,
-    return a canned response to avoid LLM latency.
-    Returns empty string if no static answer fits.
+    Only intercepts what the LLM truly cannot handle correctly:
+    - Pure contact data mid-booking (no question keywords)
+    - Safety-critical situations (fire/electrocution risk)
+    - Hard facts the model might hallucinate (working hours = 24/7)
+    - Off-topic guardrail
+
+    Everything else (intro, comparison, quality, policy...) → LLM with 3B model.
     """
     raw_q = (query or "").lower()
     q = _normalize_noaccent(raw_q)
 
-    # Don't fire any static if the message is pure contact data being provided
-    # (name + phone or address = user is mid-booking, not asking a question)
+    # Don't intercept pure contact data mid-booking
     from booking.extractor import extract_booking_from_text as _ex_check
     _contact = _ex_check(query)
     _is_contact_reply = (
         (_contact.get("phone") or _contact.get("name"))
-        and not any(kw in q for kw in ["?", "bao nhiêu", "giá", "gì vậy", "là gì",
-                                        "tư vấn", "hỏi", "khuyến mãi", "dịch vụ",
-                                        "tên gì", "ở đâu", "như thế nào", "ra sao",
-                                        "giới thiệu", "là ai", "làm gì", "công ty"])
+        and not any(kw in raw_q for kw in ["?", "bao nhiêu", "giá", "gì vậy", "là gì",
+                                            "tư vấn", "hỏi", "khuyến mãi", "dịch vụ",
+                                            "tên gì", "ở đâu", "như thế nào", "ra sao",
+                                            "giới thiệu", "là ai", "làm gì", "công ty"])
     )
     if _is_contact_reply:
         return ""
 
-    # Pre-compute intent flags used across multiple blocks
     _has_price_intent = any(k in q for k in ["bao nhiêu", "giá", "khuyến mãi", "ưu đãi", "how much", "price"])
     _has_promo_intent = any(k in q for k in ["khuyến mãi", "ưu đãi", "giảm giá", "discount", "promotion"])
-    _has_booking_intent = any(k in q for k in ["đặt lịch", "gọi thợ", "đặt thợ", "book thợ", "hẹn thợ"])
 
-    # Policy / commitment pressure
-    if any(k in q for k in ["cam kết 100%", "đền 10 triệu", "chắc chắn sửa được",
-                              "cam kết sửa", "cam kết không", "bảo đảm sửa"]):
+    # ── Safety: dangerous situations — must not let LLM fumble these ─────────
+    if any(k in q for k in ["tóe lửa", "chạm điện", "rò gas", "mùi gas", "cháy nổ"]):
         return (
-            "Dạ Fixago chưa thể xác nhận kết quả trước khi thợ kiểm tra thực tế. "
-            "Thợ sẽ báo rõ phương án và chi phí trước khi tiến hành để bạn quyết định nhé."
+            "Dạ tình trạng này nguy hiểm — bạn ngắt nguồn điện/khóa van gas ngay nếu an toàn, "
+            "tránh tự sửa. Fixago có thể cử thợ đến kiểm tra. Bạn muốn đặt lịch không ạ?"
         )
 
-    # Why Fixago vs street technician
-    if any(k in q for k in ["thợ ngoài đường", "thợ tự tìm", "sao phải đặt fixago", "thay vì gọi"]):
-        return (
-            "Dạ với Fixago bạn được thợ đã xác minh, báo giá rõ ràng trước khi làm, "
-            "và được hỗ trợ nếu có vấn đề phát sinh. Bạn muốn mình tư vấn thêm không ạ?"
-        )
-
-    # Trust / credibility question
-    if any(k in q for k in ["uy tín không", "thợ vớ vẩn", "có tin được không", "chất lượng thế nào"]):
-        return (
-            "Dạ thợ của Fixago đều được xác minh kỹ năng và kinh nghiệm. "
-            "Chi phí được báo rõ trước khi làm, không phát sinh ngoài ý muốn. "
-            "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
-        )
-
-    # Safety: dangerous electrical work
-    if any(k in q for k in ["tự tháo", "tự sửa điện", "tóe lửa", "chạm điện"]):
-        return (
-            "Dạ tình trạng này khá nguy hiểm — bạn nên ngắt cầu dao điện trước, "
-            "tránh tự tháo nếu chưa có kinh nghiệm. Fixago có thể cử thợ điện đến kiểm tra an toàn. "
-            "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
-        )
-
-    # Business hours — adaptive: single group OR two-group combos
+    # ── Hard fact: working hours (model tends to say "tôi là AI không có lịch") ──
     _HOURS_TOKENS = ["giờ làm", "thời gian làm", "thoi gian lam", "gio lam viec",
-                     "working hour", "schedule", "lam viec may gio",
-                     "ban đêm", "ban dem", "buổi tối", "buoi toi",
+                     "working hour", "lam viec may gio", "ban đêm", "ban dem",
                      "cuối tuần", "cuoi tuan", "chủ nhật", "chu nhat",
-                     "ngày lễ", "ngay le", "24/7", "24h", "suốt ngày", "suot ngay"]
+                     "ngày lễ", "ngay le", "24/7", "suốt ngày"]
     _hours_q = (
         any(k in raw_q for k in _HOURS_TOKENS)
         or _has_tokens(raw_q,
-            ["giờ", "thời gian", "thoi gian", "may gio", "lúc nào", "luc nao", "open"],
-            ["làm việc", "lam viec", "hoạt động", "hoat dong", "lam", "phục vụ", "phuc vu"])
+            ["giờ", "thời gian", "thoi gian", "lúc nào", "luc nao", "open"],
+            ["làm việc", "lam viec", "hoạt động", "hoat dong", "phục vụ", "phuc vu"])
     )
     if _hours_q:
-        _also_services = _has_tokens(raw_q, ["dịch vụ", "hỗ trợ", "làm gì", "dich vu"])
-        if _also_services:
+        if _has_tokens(raw_q, ["dịch vụ", "hỗ trợ", "làm gì", "dich vu"]):
             return (
                 "Dạ Fixago hoạt động 24/7, kể cả cuối tuần và ngày lễ. "
                 "Dịch vụ gồm sửa điện, nước, máy lạnh, xây dựng và thạch cao. "
@@ -378,188 +353,14 @@ def _static_fallback(query: str) -> str:
             "bạn đặt lịch bất kỳ lúc nào, thợ sẽ liên hệ xác nhận thời gian sớm nhất nhé."
         )
 
-    # Payment method
-    if any(k in q for k in ["tiền mặt", "chuyển khoản", "thanh toán", "payment", "pay"]):
-        return (
-            "Dạ mình chưa có thông tin đầy đủ về phương thức thanh toán. "
-            "Bạn có thể hỏi trực tiếp thợ khi họ liên hệ xác nhận lịch nhé."
-        )
-
-    # VAT / invoice
-    if any(k in q for k in ["hóa đơn", "vat", "invoice", "xuất hóa đơn"]):
-        return (
-            "Dạ mình chưa có thông tin về việc xuất hóa đơn VAT. "
-            "Bạn có thể liên hệ trực tiếp Fixago để được hỗ trợ cụ thể nhé."
-        )
-
-    # Service area
-    if any(k in q for k in ["cần thơ", "đà nẵng", "da nang", "hà nội", "hải phòng",
-                              "khu vực", "tỉnh", "vùng", "area", "support", "region"]):
-        return (
-            "Dạ mình chưa có thông tin đầy đủ về khu vực hoạt động. "
-            "Bạn để lại địa chỉ, Fixago sẽ kiểm tra và xác nhận có hỗ trợ được không nhé."
-        )
-
-    # Warranty — skip if query also asks for price (tool will handle that, mention warranty in passing)
-    if not _has_price_intent and any(k in q for k in ["bảo hành", "warranty", "guarantee"]):
-        return (
-            "Dạ thông tin bảo hành phụ thuộc vào từng hạng mục. "
-            "Thợ sẽ trao đổi cụ thể với bạn khi đến kiểm tra nhé. "
-            "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
-        )
-
-    # Delivery time / ETA
-    if (any(k in q for k in ["bao lâu thợ tới", "thợ tới lúc nào", "khi nào thợ đến",
-                               "how long", "how soon"])
-            or re.search(r'\beta\b', q)):
-        return (
-            "Dạ thời gian thợ đến phụ thuộc vào lịch và khu vực. "
-            "Sau khi đặt lịch, hệ thống sẽ xác nhận thời gian cụ thể với bạn nhé."
-        )
-
-    # Technician selection
-    if any(k in q for k in ["chọn thợ", "thợ cụ thể", "thợ quen", "choose technician"]):
-        return (
-            "Dạ hiện tại Fixago sẽ điều phối thợ phù hợp nhất với yêu cầu và khu vực của bạn. "
-            "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
-        )
-
-    # Urgent / 5 minutes
-    if any(k in q for k in ["ngay lập tức", "trong 5 phút", "ngay bây giờ", "cấp cứu", "urgent"]):
-        return (
-            "Dạ Fixago điều phối theo lịch — mình không thể đảm bảo thợ đến ngay trong vài phút. "
-            "Bạn đặt lịch để Fixago liên hệ sắp xếp sớm nhất có thể nhé?"
-        )
-
-    # Package tiers
-    if any(k in q for k in ["gói tiết kiệm", "gói tiêu chuẩn", "gói cao cấp", "package"]):
-        return (
-            "Dạ hiện Fixago tính giá theo từng hạng mục dịch vụ thực tế, "
-            "không có gói cố định. Thợ sẽ báo giá rõ trước khi làm nhé."
-        )
-
-    # Company name / location — token-based: (tên/name/gọi là) + (công ty/fixago/bạn)
-    _company_name_q = (
-        _has_tokens(raw_q, ["tên", "name", "gọi là", "ten", "goi la"],
-                            ["công ty", "fixago", "cong ty"])
-        or _has_tokens(raw_q, ["công ty", "cong ty", "fixago"], ["ở đâu", "o dau", "where"])
-        or any(k in raw_q for k in ["ten cong ty", "tên công ty", "fixago tên gì", "fixago o dau"])
-    )
-    if _company_name_q:
-        return (
-            "Dạ công ty mình tên là Fixago — nền tảng đặt thợ sửa chữa điện, nước, "
-            "điện lạnh, xây dựng và thạch cao tại nhà. "
-            "Bạn cần hỗ trợ hạng mục nào ạ?"
-        )
-
-    # Vague price + quality question without a service category.
-    _has_service_context = any(k in q for k in [
-        "điện", "nước", "máy lạnh", "điện lạnh", "máy giặt", "tủ lạnh",
-        "ống", "vòi", "bồn cầu", "chập", "ổ cắm", "aptomat",
-        "sơn", "chống thấm", "xây dựng", "thạch cao", "trần", "vách",
-        "air conditioner", "air con", "aircon", "plumb", "pipe", "leak",
-        "electrical", "electric", "refrigerat", "washing machine",
-    ])
-    if _has_price_intent and not _has_service_context and any(k in q for k in [
-        "giá bên bạn", "giá bên mình", "giá thế nào", "giá sao",
-        "tốt không", "ổn không", "uy tín không", "chất lượng không",
-    ]):
-        return (
-            "Dạ giá của Fixago tùy theo hạng mục và tình trạng thực tế, thợ sẽ báo rõ trước khi làm. "
-            "Fixago điều phối thợ phù hợp và có hỗ trợ nếu phát sinh vấn đề sau dịch vụ. "
-            "Bạn cần sửa điện, nước, máy lạnh hay hạng mục nào ạ?"
-        )
-
-    # Identity — who is the bot / what can it do
-    _identity_q = (
-        _has_tokens(raw_q, ["bạn", "ban", "you", "mày", "mình"],
-                            ["là ai", "la ai", "là gì", "la gi", "who are", "what are"])
-        or _has_tokens(raw_q, ["bạn", "ban", "you"],
-                               ["giúp", "hỗ trợ", "làm", "help", "giup", "ho tro"])
-        or any(k in raw_q for k in ["who are you", "what can you", "how can you help"])
-    )
-    if _identity_q:
-        return (
-            "Dạ mình là Trợ lý AI của Fixago — nền tảng đặt thợ sửa chữa điện, nước, "
-            "điện lạnh, xây dựng và thạch cao tại nhà. Bạn cần hỗ trợ gì không ạ?"
-        )
-
-    # Technician quality / training
-    # Don't fire if query also has a price/promo intent (will be handled by tool)
-    _tech_quality_q = _has_tokens(raw_q,
-        ["thợ", "tho", "kỹ thuật viên", "technician", "worker"],
-        ["đào tạo", "dao tao", "kinh nghiệm", "kinh nghiem", "chuyên nghiệp", "chuyen nghiep",
-         "giỏi", "gioi", "tay nghề", "tay nghe", "kỹ năng", "ky nang", "skilled", "trained",
-         "chất lượng", "chat luong", "uy tín", "uy tin"])
-    if not _has_price_intent and _tech_quality_q:
-        return (
-            "Dạ thợ của Fixago đều qua kiểm tra kỹ năng và xác minh kinh nghiệm thực tế trước khi nhận việc. "
-            "Không phải thợ tự do ngẫu nhiên — mỗi thợ được đánh giá và theo dõi chất lượng sau từng đơn. "
-            "Bạn muốn mình tư vấn thêm hoặc hỗ trợ đặt lịch không ạ?"
-        )
-
-    # Complaint / after-service support
-    if any(k in q for k in ["khiếu nại", "không hài lòng", "thợ làm sai", "làm không tốt",
-                              "làm hỏng", "sửa không được", "complain", "refund", "hoàn tiền",
-                              "đền bù", "trách nhiệm", "phản ánh"]):
-        return (
-            "Dạ nếu bạn chưa hài lòng sau khi thợ làm, bạn có thể phản ánh trực tiếp qua ứng dụng Fixago "
-            "hoặc liên hệ bộ phận hỗ trợ. Fixago sẽ xem xét và có phương án xử lý phù hợp với từng trường hợp. "
-            "Bạn muốn mình hỗ trợ gì thêm không ạ?"
-        )
-
-    # Comparison with competitors / street technicians
-    # Don't fire if there's also a promo or price query — let tool handle that part first
-    _COMPARE_TOKENS = ["so sánh", "so sanh", "ưu điểm", "uu diem", "điểm mạnh", "diem manh",
-                       "lợi thế", "loi the", "advantage", "compare", "better than",
-                       "different from", "tốt hơn", "tot hon", "rẻ hơn", "re hon",
-                       "hơn gì", "hon gi", "khác gì", "khac gi", "khác với", "khac voi"]
-    _comparison_match = (
-        any(k in raw_q for k in _COMPARE_TOKENS)
-        or _has_tokens(raw_q,
-            ["fixago", "bên bạn", "ben ban", "công ty bạn", "cong ty ban", "dịch vụ bạn"],
-            ["khác", "khac", "hơn", "hon", "so", "tốt", "tot", "bằng", "bang"])
-    )
-    if not _has_promo_intent and _comparison_match:
-        return (
-            "Dạ so với tìm thợ tự do hoặc app khác, Fixago khác biệt ở 3 điểm: "
-            "① Thợ được xác minh kỹ năng và lịch sử làm việc trước khi nhận đơn. "
-            "② Báo giá rõ ràng trước khi thợ bắt tay vào làm — không phát sinh ngoài ý muốn. "
-            "③ Hỗ trợ sau dịch vụ nếu có vấn đề phát sinh. "
-            "Bạn muốn mình tư vấn thêm hoặc đặt lịch không ạ?"
-        )
-
-    # Introduction / what is Fixago or about the company
-    _intro_q = (
-        _has_tokens(raw_q, ["giới thiệu", "gioi thieu", "introduce", "tell me about",
-                             "về fixago", "ve fixago", "about fixago"])
-        or _has_tokens(raw_q, ["fixago", "công ty", "cong ty"],
-                               ["là gì", "la gi", "là ai", "la ai", "làm gì", "lam gi",
-                                "hoạt động", "hoat dong", "what is", "who is"])
-        or _has_tokens(raw_q, ["giới thiệu", "gioi thieu"],
-                               ["công ty", "cong ty", "cty", "bạn", "ban"])
-    )
-    if _intro_q:
-        return (
-            "Dạ Fixago là nền tảng đặt thợ sửa chữa nhà uy tín — kết nối bạn với thợ điện, nước, "
-            "điện lạnh, xây dựng và thạch cao đã được xác minh. "
-            "Chỉ cần mô tả sự cố, Fixago điều phối thợ phù hợp, báo giá rõ trước khi làm, "
-            "và hỗ trợ sau dịch vụ nếu cần. Bạn đang cần hỗ trợ hạng mục nào ạ?"
-        )
-
-    # Off-topic
+    # ── Off-topic guardrail ───────────────────────────────────────────────────
     if any(k in q for k in ["nấu phở", "tình yêu", "love poem", "thơ tình", "bài thơ",
-                              "nấu ăn", "recipe", "cooking", "bóng đá", "football"]):
+                              "nấu ăn", "recipe", "cooking", "bóng đá", "football",
+                              "thời tiết", "weather", "tin tức", "news"]):
         return (
-            "Dạ mình chỉ hỗ trợ về dịch vụ sửa chữa nhà của Fixago thôi ạ 😊 "
-            "Bạn có cần tư vấn sửa chữa điện, nước, máy lạnh hay xây dựng không?"
+            "Dạ mình chỉ hỗ trợ dịch vụ sửa chữa nhà của Fixago thôi ạ 😊 "
+            "Bạn cần tư vấn điện, nước, máy lạnh hay xây dựng không?"
         )
-
-    # Consultation-only: user explicitly says they just want advice, not booking
-    if any(k in q for k in ["chỉ hỏi", "hỏi thôi", "tư vấn thôi", "chỉ muốn hỏi",
-                              "không muốn đặt", "chưa muốn đặt"]):
-        # Route to price/service info if service keyword present
-        return ""  # let normal routing handle; negation guard prevents booking
 
     # Ambiguous "cái này" / "nhìn giúp" — can't price without details
     if any(k in q for k in ["cái này", "nhìn giúp", "xem giúp", "xem cái này"]):
@@ -581,8 +382,9 @@ def _static_fallback(query: str) -> str:
     # Single-word "Điện" response during a conversation where service is ambiguous
     # (handled by routing to price tool if standalone in _detect_tool_intent)
 
-    # Emoji / noisy urgent repair — only fire if no explicit booking intent
-    _ELECTRIC_NOISE = ["chập điện", "cháy điện", "tóe lửa", "điện bị", "hở điện"]
+    # Electrical emergency — route to booking prompt
+    _ELECTRIC_NOISE = ["chập điện", "cháy điện", "điện bị", "hở điện"]
+    _has_booking_intent = any(k in q for k in ["đặt lịch", "gọi thợ", "đặt thợ", "book thợ", "hẹn thợ"])
     if not _has_booking_intent and any(k in q for k in _ELECTRIC_NOISE):
         return (
             "Dạ tình trạng chập điện cần xử lý ngay. Fixago có thể cử thợ điện đến kiểm tra và sửa an toàn. "
