@@ -15,6 +15,14 @@
             --bot-msg: rgba(255, 255, 255, 0.03);
             --text-light: #ffffff;
             --text-muted: #9ca3af;
+            --content-width: 800px;
+            --side-pad: max(20px, calc(50vw - (var(--content-width) / 2)));
+        }
+        * {
+            box-sizing: border-box;
+        }
+        html {
+            height: 100%;
         }
         body {
             font-family: 'Inter', sans-serif;
@@ -23,7 +31,8 @@
                               radial-gradient(circle at bottom left, rgba(255, 107, 0, 0.05), transparent 40%);
             color: var(--text-light);
             margin: 0;
-            height: 100vh;
+            min-height: 100vh;
+            min-height: 100dvh;
             display: flex;
             flex-direction: column;
             overflow: hidden;
@@ -31,12 +40,17 @@
         .header {
             background: rgba(15, 17, 21, 0.7);
             backdrop-filter: blur(12px);
-            padding: 20px 30px;
+            padding: 18px var(--side-pad);
             display: flex;
             align-items: center;
             justify-content: space-between;
+            gap: 16px;
             border-bottom: 1px solid rgba(255,255,255,0.05);
             z-index: 10;
+            flex-shrink: 0;
+        }
+        .header-content {
+            min-width: 0;
         }
         .header-content h1 {
             margin: 0;
@@ -45,12 +59,32 @@
             background: linear-gradient(90deg, #FF6B00, #FFB800);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
-            letter-spacing: -0.5px;
+            letter-spacing: 0;
         }
         .header-content p {
             margin: 4px 0 0;
             font-size: 13px;
             color: var(--text-muted);
+            overflow-wrap: anywhere;
+        }
+        .header-actions {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-shrink: 0;
+        }
+        .reset-btn {
+            width: auto;
+            height: 30px;
+            border-radius: 8px;
+            font-size: 12px;
+            padding: 0 12px;
+            font-weight: 500;
+            color: var(--text-light);
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2);
+            box-shadow: none;
+            margin: 0;
         }
         .badge {
             background: rgba(255, 107, 0, 0.1);
@@ -64,7 +98,8 @@
         }
         .chat-container {
             flex: 1;
-            padding: 30px max(20px, calc(50vw - 400px));
+            min-height: 0;
+            padding: 28px var(--side-pad);
             overflow-y: auto;
             display: flex;
             flex-direction: column;
@@ -84,6 +119,7 @@
             line-height: 1.6;
             animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1);
             word-wrap: break-word;
+            overflow-wrap: anywhere;
         }
         @keyframes slideUp {
             from { opacity: 0; transform: translateY(20px) scale(0.98); }
@@ -125,12 +161,13 @@
         .input-area {
             background: rgba(15, 17, 21, 0.8);
             backdrop-filter: blur(20px);
-            padding: 20px max(20px, calc(50vw - 400px));
+            padding: 18px var(--side-pad) calc(18px + env(safe-area-inset-bottom));
             border-top: 1px solid rgba(255,255,255,0.05);
             display: flex;
             gap: 12px;
             align-items: flex-end;
             position: relative;
+            flex-shrink: 0;
         }
         .input-wrapper {
             flex: 1;
@@ -231,6 +268,115 @@
             0%, 80%, 100% { transform: scale(0); opacity: 0.3; }
             40% { transform: scale(1); opacity: 1; }
         }
+
+        @media (max-width: 720px) {
+            :root {
+                --side-pad: 16px;
+            }
+            .header {
+                padding-top: 14px;
+                padding-bottom: 14px;
+                align-items: flex-start;
+            }
+            .header-content h1 {
+                font-size: 21px;
+            }
+            .header-content p {
+                font-size: 12px;
+            }
+            .header-actions {
+                flex-direction: column-reverse;
+                align-items: flex-end;
+                gap: 8px;
+            }
+            .badge {
+                font-size: 11px;
+                padding: 5px 9px;
+                white-space: nowrap;
+            }
+            .reset-btn {
+                height: 32px;
+                padding: 0 10px;
+                white-space: nowrap;
+            }
+            .chat-container {
+                padding-top: 18px;
+                padding-bottom: 18px;
+                gap: 16px;
+            }
+            .message {
+                max-width: 92%;
+                padding: 13px 16px;
+                border-radius: 18px;
+                font-size: 14px;
+                line-height: 1.55;
+            }
+            .bot_tool {
+                max-width: 92%;
+                font-size: 12px;
+                padding: 9px 12px;
+            }
+            .typing-wrapper {
+                padding: 13px 16px;
+                max-width: 92%;
+            }
+            .input-area {
+                padding-top: 12px;
+                gap: 10px;
+            }
+            .input-wrapper {
+                border-radius: 16px;
+                padding: 10px 14px;
+            }
+            textarea {
+                font-size: 16px;
+                max-height: 100px;
+            }
+            button {
+                width: 46px;
+                height: 46px;
+            }
+        }
+
+        @media (max-width: 420px) {
+            :root {
+                --side-pad: 12px;
+            }
+            .header {
+                gap: 10px;
+            }
+            .header-content h1 {
+                font-size: 19px;
+            }
+            .header-content p {
+                display: none;
+            }
+            .badge {
+                display: none;
+            }
+            .message {
+                max-width: 96%;
+                padding: 12px 14px;
+            }
+            .input-area {
+                padding-left: 10px;
+                padding-right: 10px;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .message,
+            .dot,
+            button,
+            button svg,
+            .input-wrapper {
+                animation: none;
+                transition: none;
+            }
+            .chat-container {
+                scroll-behavior: auto;
+            }
+        }
     </style>
 </head>
 <body>
@@ -239,8 +385,8 @@
             <h1>Fixago AI</h1>
             <p>RAG + Live API + Prompt Guard</p>
         </div>
-        <div style="display: flex; gap: 10px; align-items: center;">
-            <button onclick="resetSession()" style="width: auto; height: 30px; border-radius: 8px; font-size: 12px; padding: 0 12px; font-weight: 500; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2);">Reset Chat</button>
+        <div class="header-actions">
+            <button class="reset-btn" onclick="resetSession()">Reset Chat</button>
             <div class="badge">Production Demo</div>
         </div>
     </div>
@@ -260,7 +406,7 @@
         <div class="input-wrapper">
             <textarea id="query" rows="1" placeholder="Hỏi AI về dịch vụ Fixago..." onkeypress="handleEnter(event)" oninput="autoResize(this)"></textarea>
         </div>
-        <button onclick="sendMsg()" id="sendBtn">
+        <button onclick="sendMsg()" id="sendBtn" aria-label="Gửi tin nhắn">
             <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
         </button>
     </div>
