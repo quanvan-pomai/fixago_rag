@@ -250,7 +250,7 @@ def merge_booking_info(query: str, history: List[Dict]) -> Dict[str, Optional[st
     info: Dict[str, Optional[str]] = {"name": None, "phone": None, "address": None, "issue": None}
 
     for msg in history[-12:]:
-        if msg.get("role") != "user":
+        if msg.get("role") == "system":
             continue
         extracted = extract_booking_from_text(msg.get("content", ""))
         for k, v in extracted.items():
@@ -265,7 +265,9 @@ def merge_booking_info(query: str, history: List[Dict]) -> Dict[str, Optional[st
     # Infer issue from recent user turns if still missing
     if not info.get("issue"):
         issue_hints = ["sửa", "hỏng", "lỗi", "chập", "rò", "nghẹt", "không lạnh",
-                       "vỡ", "thấm", "dột", "tắc", "không lên", "không hoạt động"]
+                       "vỡ", "thấm", "dột", "tắc", "không lên", "không hoạt động",
+                       "leak", "leaking", "pipe", "plumber", "fix", "repair",
+                       "not cold", "broken", "clog", "water"]
         for msg in reversed(history[-12:]):
             if msg.get("role") == "user":
                 c = msg.get("content", "")

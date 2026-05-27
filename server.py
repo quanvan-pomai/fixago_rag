@@ -271,6 +271,27 @@ def _detect_tool_intent(query: str):
     return None
 
 
+# ── Intent token matcher (fuzzy, accent-tolerant) ────────────────────────────
+
+def _has_tokens(text: str, *token_groups) -> bool:
+    """
+    Returns True if the text contains at least one token from EVERY group.
+    Each group is a list of synonymous keywords (OR within group, AND across groups).
+    Accent-insensitive: checks both raw and normalized text.
+
+    Example:
+        _has_tokens(q, ["giờ","thời gian","schedule"], ["làm việc","hoạt động","open"])
+        → True if text has (giờ OR thời gian OR schedule) AND (làm việc OR hoạt động OR open)
+    """
+    t = text.lower()
+    # Also check unaccented form for no-accent inputs
+    t2 = _normalize_noaccent(t)
+    for group in token_groups:
+        if not any(k in t or k in t2 for k in group):
+            return False
+    return True
+
+
 # ── Static fallback (no LLM needed) ──────────────────────────────────────────
 
 def _static_fallback(query: str) -> str:
@@ -279,7 +300,8 @@ def _static_fallback(query: str) -> str:
     return a canned response to avoid LLM latency.
     Returns empty string if no static answer fits.
     """
-    q = _normalize_noaccent((query or "").lower())
+    raw_q = (query or "").lower()
+    q = _normalize_noaccent(raw_q)
 
     # Don't fire any static if the message is pure contact data being provided
     # (name + phone or address = user is mid-booking, not asking a question)
@@ -288,7 +310,9 @@ def _static_fallback(query: str) -> str:
     _is_contact_reply = (
         (_contact.get("phone") or _contact.get("name"))
         and not any(kw in q for kw in ["?", "bao nhiêu", "giá", "gì vậy", "là gì",
-                                        "tư vấn", "hỏi", "khuyến mãi", "dịch vụ"])
+                                        "tư vấn", "hỏi", "khuyến mãi", "dịch vụ",
+                                        "tên gì", "ở đâu", "như thế nào", "ra sao",
+                                        "giới thiệu", "là ai", "làm gì", "công ty"])
     )
     if _is_contact_reply:
         return ""
@@ -329,11 +353,29 @@ def _static_fallback(query: str) -> str:
             "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
         )
 
-    # Business hours
-    if any(k in q for k in ["mấy giờ", "giờ làm việc", "ban đêm", "working hour", "open"]):
+    # Business hours — adaptive: single group OR two-group combos
+    _HOURS_TOKENS = ["giờ làm", "thời gian làm", "thoi gian lam", "gio lam viec",
+                     "working hour", "schedule", "lam viec may gio",
+                     "ban đêm", "ban dem", "buổi tối", "buoi toi",
+                     "cuối tuần", "cuoi tuan", "chủ nhật", "chu nhat",
+                     "ngày lễ", "ngay le", "24/7", "24h", "suốt ngày", "suot ngay"]
+    _hours_q = (
+        any(k in raw_q for k in _HOURS_TOKENS)
+        or _has_tokens(raw_q,
+            ["giờ", "thời gian", "thoi gian", "may gio", "lúc nào", "luc nao", "open"],
+            ["làm việc", "lam viec", "hoạt động", "hoat dong", "lam", "phục vụ", "phuc vu"])
+    )
+    if _hours_q:
+        _also_services = _has_tokens(raw_q, ["dịch vụ", "hỗ trợ", "làm gì", "dich vu"])
+        if _also_services:
+            return (
+                "Dạ Fixago hoạt động 24/7, kể cả cuối tuần và ngày lễ. "
+                "Dịch vụ gồm sửa điện, nước, máy lạnh, xây dựng và thạch cao. "
+                "Bạn cần hỗ trợ hạng mục nào ạ?"
+            )
         return (
-            "Dạ mình chưa có thông tin chính xác về giờ làm việc của Fixago. "
-            "Sau khi đặt lịch, thợ sẽ liên hệ xác nhận thời gian phù hợp với bạn nhé."
+            "Dạ Fixago hoạt động 24/7, kể cả cuối tuần và ngày lễ — "
+            "bạn đặt lịch bất kỳ lúc nào, thợ sẽ liên hệ xác nhận thời gian sớm nhất nhé."
         )
 
     # Payment method
@@ -396,13 +438,47 @@ def _static_fallback(query: str) -> str:
             "không có gói cố định. Thợ sẽ báo giá rõ trước khi làm nhé."
         )
 
-    # Identity
-    if any(k in q for k in [
-        "bạn là ai", "who are you", "bạn là gì", "tên bạn là gì",
-        "bạn có thể hỗ trợ", "bạn hỗ trợ", "hỗ trợ tôi những gì",
-        "bạn giúp được gì", "bạn có thể giúp", "công ty bạn làm gì",
-        "how can you help", "how you can help", "what can you help",
+    # Company name / location — token-based: (tên/name/gọi là) + (công ty/fixago/bạn)
+    _company_name_q = (
+        _has_tokens(raw_q, ["tên", "name", "gọi là", "ten", "goi la"],
+                            ["công ty", "fixago", "cong ty"])
+        or _has_tokens(raw_q, ["công ty", "cong ty", "fixago"], ["ở đâu", "o dau", "where"])
+        or any(k in raw_q for k in ["ten cong ty", "tên công ty", "fixago tên gì", "fixago o dau"])
+    )
+    if _company_name_q:
+        return (
+            "Dạ công ty mình tên là Fixago — nền tảng đặt thợ sửa chữa điện, nước, "
+            "điện lạnh, xây dựng và thạch cao tại nhà. "
+            "Bạn cần hỗ trợ hạng mục nào ạ?"
+        )
+
+    # Vague price + quality question without a service category.
+    _has_service_context = any(k in q for k in [
+        "điện", "nước", "máy lạnh", "điện lạnh", "máy giặt", "tủ lạnh",
+        "ống", "vòi", "bồn cầu", "chập", "ổ cắm", "aptomat",
+        "sơn", "chống thấm", "xây dựng", "thạch cao", "trần", "vách",
+        "air conditioner", "air con", "aircon", "plumb", "pipe", "leak",
+        "electrical", "electric", "refrigerat", "washing machine",
+    ])
+    if _has_price_intent and not _has_service_context and any(k in q for k in [
+        "giá bên bạn", "giá bên mình", "giá thế nào", "giá sao",
+        "tốt không", "ổn không", "uy tín không", "chất lượng không",
     ]):
+        return (
+            "Dạ giá của Fixago tùy theo hạng mục và tình trạng thực tế, thợ sẽ báo rõ trước khi làm. "
+            "Fixago điều phối thợ phù hợp và có hỗ trợ nếu phát sinh vấn đề sau dịch vụ. "
+            "Bạn cần sửa điện, nước, máy lạnh hay hạng mục nào ạ?"
+        )
+
+    # Identity — who is the bot / what can it do
+    _identity_q = (
+        _has_tokens(raw_q, ["bạn", "ban", "you", "mày", "mình"],
+                            ["là ai", "la ai", "là gì", "la gi", "who are", "what are"])
+        or _has_tokens(raw_q, ["bạn", "ban", "you"],
+                               ["giúp", "hỗ trợ", "làm", "help", "giup", "ho tro"])
+        or any(k in raw_q for k in ["who are you", "what can you", "how can you help"])
+    )
+    if _identity_q:
         return (
             "Dạ mình là Trợ lý AI của Fixago — nền tảng đặt thợ sửa chữa điện, nước, "
             "điện lạnh, xây dựng và thạch cao tại nhà. Bạn cần hỗ trợ gì không ạ?"
@@ -410,11 +486,12 @@ def _static_fallback(query: str) -> str:
 
     # Technician quality / training
     # Don't fire if query also has a price/promo intent (will be handled by tool)
-    if not _has_price_intent and any(k in q for k in [
-        "đào tạo không", "thợ được đào tạo", "thợ có kinh nghiệm",
-        "thợ chuyên nghiệp", "tay nghề", "kỹ năng thợ", "thợ có giỏi",
-        "trained technician", "skilled",
-    ]):
+    _tech_quality_q = _has_tokens(raw_q,
+        ["thợ", "tho", "kỹ thuật viên", "technician", "worker"],
+        ["đào tạo", "dao tao", "kinh nghiệm", "kinh nghiem", "chuyên nghiệp", "chuyen nghiep",
+         "giỏi", "gioi", "tay nghề", "tay nghe", "kỹ năng", "ky nang", "skilled", "trained",
+         "chất lượng", "chat luong", "uy tín", "uy tin"])
+    if not _has_price_intent and _tech_quality_q:
         return (
             "Dạ thợ của Fixago đều qua kiểm tra kỹ năng và xác minh kinh nghiệm thực tế trước khi nhận việc. "
             "Không phải thợ tự do ngẫu nhiên — mỗi thợ được đánh giá và theo dõi chất lượng sau từng đơn. "
@@ -433,11 +510,17 @@ def _static_fallback(query: str) -> str:
 
     # Comparison with competitors / street technicians
     # Don't fire if there's also a promo or price query — let tool handle that part first
-    if not _has_promo_intent and any(k in q for k in [
-        "khác với", "khác gì", "hơn gì", "tốt hơn", "so với",
-        "so sánh", "compare", "better than", "different from",
-        "app khác", "dịch vụ khác", "nền tảng khác", "rẻ hơn",
-    ]):
+    _COMPARE_TOKENS = ["so sánh", "so sanh", "ưu điểm", "uu diem", "điểm mạnh", "diem manh",
+                       "lợi thế", "loi the", "advantage", "compare", "better than",
+                       "different from", "tốt hơn", "tot hon", "rẻ hơn", "re hon",
+                       "hơn gì", "hon gi", "khác gì", "khac gi", "khác với", "khac voi"]
+    _comparison_match = (
+        any(k in raw_q for k in _COMPARE_TOKENS)
+        or _has_tokens(raw_q,
+            ["fixago", "bên bạn", "ben ban", "công ty bạn", "cong ty ban", "dịch vụ bạn"],
+            ["khác", "khac", "hơn", "hon", "so", "tốt", "tot", "bằng", "bang"])
+    )
+    if not _has_promo_intent and _comparison_match:
         return (
             "Dạ so với tìm thợ tự do hoặc app khác, Fixago khác biệt ở 3 điểm: "
             "① Thợ được xác minh kỹ năng và lịch sử làm việc trước khi nhận đơn. "
@@ -446,10 +529,17 @@ def _static_fallback(query: str) -> str:
             "Bạn muốn mình tư vấn thêm hoặc đặt lịch không ạ?"
         )
 
-    # Introduction / what is Fixago
-    if any(k in q for k in ["fixago là gì", "fixago là ai", "giới thiệu fixago",
-                              "fixago hoạt động", "fixago làm gì", "công ty fixago",
-                              "about fixago", "what is fixago", "tell me about fixago"]):
+    # Introduction / what is Fixago or about the company
+    _intro_q = (
+        _has_tokens(raw_q, ["giới thiệu", "gioi thieu", "introduce", "tell me about",
+                             "về fixago", "ve fixago", "about fixago"])
+        or _has_tokens(raw_q, ["fixago", "công ty", "cong ty"],
+                               ["là gì", "la gi", "là ai", "la ai", "làm gì", "lam gi",
+                                "hoạt động", "hoat dong", "what is", "who is"])
+        or _has_tokens(raw_q, ["giới thiệu", "gioi thieu"],
+                               ["công ty", "cong ty", "cty", "bạn", "ban"])
+    )
+    if _intro_q:
         return (
             "Dạ Fixago là nền tảng đặt thợ sửa chữa nhà uy tín — kết nối bạn với thợ điện, nước, "
             "điện lạnh, xây dựng và thạch cao đã được xác minh. "
@@ -678,6 +768,80 @@ def _run_legacy_tool_path(query: str, history: list, messages: list, used_tools:
     return answer
 
 
+def _run_legacy_fast_path(query: str, history: list, messages: list, used_tools: list):
+    """
+    Handle deterministic static/booking/tool responses before RAG retrieval or
+    LLM fallback. Returns None when the request needs the model.
+    """
+    forced_tool = _detect_tool_intent(query)
+    forced_tool = _detect_multi_service(query, forced_tool, messages, used_tools)
+
+    static_early = _static_fallback(query)
+    if static_early:
+        return static_early
+
+    _has_service_tool = forced_tool and "get_services" in str(forced_tool)
+    if not detect_negation(query) and not _has_service_tool:
+        booking_resp = build_booking_response(query, history)
+    else:
+        booking_resp = None
+
+    promo_or_groups = forced_tool and any(t in forced_tool for t in ["get_promotions", "get_groups"])
+
+    if forced_tool and not forced_tool.startswith("CALL_TOOL:"):
+        return forced_tool
+
+    if booking_resp and "CALL_TOOL: create_booking" in booking_resp:
+        answer = booking_resp
+    elif promo_or_groups:
+        answer = forced_tool
+    elif booking_resp:
+        answer = booking_resp
+    elif forced_tool:
+        answer = forced_tool
+    else:
+        return None
+
+    answer = repair_booking_tool_call(answer, query, history)
+
+    if "CALL_TOOL: get_groups" in answer:
+        messages.append({"role": "assistant", "content": answer})
+        return handle_get_groups(messages, used_tools)
+
+    if "CALL_TOOL: get_services" in answer:
+        m      = re.search(r'search="([^"]*)"', answer)
+        search = normalize_service_search(m.group(1) if m else "")
+        messages.append({"role": "assistant", "content": answer})
+        svc_result = handle_get_services(search, messages, used_tools)
+        q_low = (query or "").lower()
+        if any(k in q_low for k in ["bảo hành", "warranty", "guarantee"]):
+            svc_result = svc_result.rstrip() + "\n\nVề bảo hành: thông tin cụ thể phụ thuộc từng hạng mục, thợ sẽ trao đổi rõ khi đến kiểm tra."
+        if any(k in q_low for k in ["rẻ hơn", "so với", "so sánh", "tốt hơn", "thợ tự do", "compare"]):
+            svc_result = svc_result.rstrip() + "\nThợ Fixago đã được xác minh kỹ năng, báo giá minh bạch trước khi làm — không lo phát sinh."
+        return svc_result
+
+    if "CALL_TOOL: get_promotions" in answer:
+        messages.append({"role": "assistant", "content": answer})
+        promo_result = handle_get_promotions(messages, used_tools)
+        q_low = (query or "").lower()
+        if any(k in q_low for k in ["rẻ hơn", "so với", "tốt hơn", "thợ tự do", "compare", "cheaper"]):
+            promo_result = promo_result.rstrip() + "\n\nVề chi phí so với thợ tự do: Fixago báo giá minh bạch trước khi làm, thợ đã được xác minh — không lo phát sinh chi phí ngoài ý muốn."
+        return promo_result
+
+    if "create_booking" in answer.lower():
+        return handle_create_booking(answer, used_tools)
+
+    return answer
+
+
+def _persist_session(session_id: str, session: dict, query: str, answer: str):
+    session["history"].append({"role": "user",      "content": query})
+    session["history"].append({"role": "assistant", "content": answer})
+    session["history"]       = _compact_history(session["history"], max_items=8)
+    session["booking_state"] = merge_booking_info(query, session["history"])
+    SessionManager.save(session_id, session)
+
+
 # ── Flask routes ──────────────────────────────────────────────────────────────
 
 @app.route("/", methods=["GET"])
@@ -741,6 +905,25 @@ def query_rag():
         base_prompt = data.get("system_prompt", _load_system_prompt())
         system      = _build_system_prompt(base_prompt, session.get("booking_state", {}))
 
+        # ── Fast path ─────────────────────────────────────────────────────────
+        # Most production traffic is static policy, booking state, or backend
+        # tools. Handle that before RAG retrieval and before any model call.
+        used_tools: list = []
+        if not ENABLE_NATIVE_TOOL_CALL and not use_cache:
+            fast_messages = [{"role": "system", "content": system}]
+            fast_messages.extend(_compact_history(history, max_items=6))
+            fast_messages.append({"role": "user", "content": query})
+            fast_answer = _run_legacy_fast_path(query, history, fast_messages, used_tools)
+            if fast_answer is not None:
+                _persist_session(session_id, session, query, fast_answer)
+                return jsonify({
+                    "status": "success",
+                    "response": fast_answer,
+                    "source": "llm",
+                    "tool_calls": used_tools,
+                    "cache_metrics": {"hit": False, "cached_tokens": 0, "savings_ratio": 0.0},
+                })
+
         # ── RAG context ───────────────────────────────────────────────────────
         rag_context = ""
         try:
@@ -778,7 +961,7 @@ def query_rag():
 
         # ── Build messages ────────────────────────────────────────────────────
         messages = [{"role": "system", "content": system}]
-        messages.extend(history)
+        messages.extend(_compact_history(history, max_items=6))
         messages.append({
             "role": "user",
             "content": (
@@ -788,7 +971,6 @@ def query_rag():
         })
 
         # ── Orchestrate ───────────────────────────────────────────────────────
-        used_tools: list = []
         answer = (
             _run_native_tool_path(query, history, messages, used_tools)
             if ENABLE_NATIVE_TOOL_CALL
@@ -796,11 +978,7 @@ def query_rag():
         )
 
         # ── Persist session ───────────────────────────────────────────────────
-        session["history"].append({"role": "user",      "content": query})
-        session["history"].append({"role": "assistant", "content": answer})
-        session["history"]       = _compact_history(session["history"], max_items=12)
-        session["booking_state"] = merge_booking_info(query, session["history"])
-        SessionManager.save(session_id, session)
+        _persist_session(session_id, session, query, answer)
 
         # ── Write cache ───────────────────────────────────────────────────────
         if use_cache:

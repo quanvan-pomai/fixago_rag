@@ -156,6 +156,33 @@ make cheesepath    # Build Go lib only
 make status        # Check submodule status
 ```
 
+### Optional — Optimized Cheesebrain CPU Build
+
+For CPU-only VPS deployments, rebuild `cheese-server` in Release mode with native CPU optimization. This can improve token generation speed on weak CPUs.
+
+Run this on the same machine that will run `cheese-server`:
+
+```bash
+cmake -S cheesebrain -B cheesebrain/build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DGGML_NATIVE=ON \
+  -DGGML_OPENMP=ON \
+  -DCHEESE_BUILD_TESTS=OFF \
+  -DCHEESE_BUILD_EXAMPLES=OFF \
+  -DCHEESE_BUILD_TOOLS=ON \
+  -DCHEESE_BUILD_SERVER=ON
+
+cmake --build cheesebrain/build --target cheese-server -j2
+```
+
+The configure output should include something like:
+
+```text
+Adding CPU backend variant ggml-cpu: -march=native
+```
+
+Do not build with `GGML_NATIVE=ON` on one machine and copy the binary to a different VPS unless the CPUs are compatible. For best results, build directly on the VPS.
+
 ### Step 3 — Configure Environment
 
 Copy the example env file and edit it:

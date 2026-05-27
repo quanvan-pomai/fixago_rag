@@ -97,7 +97,7 @@ def handle_get_services(search_arg: str, messages: List[Dict], used_tools: List[
         if resp.status_code != 200:
             return (
                 "Dạ hiện mình chưa lấy được bảng giá từ hệ thống. "
-                "Fixago vẫn có thể cử thợ đến kiểm tra thực tế và báo chi phí rõ ràng trước khi làm. "
+                "Dạ giá của Fixago tùy theo hạng mục và tình trạng thực tế, thợ sẽ báo rõ trước khi làm. "
                 "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
             )
 
@@ -112,7 +112,7 @@ def handle_get_services(search_arg: str, messages: List[Dict], used_tools: List[
         if not services:
             return (
                 f"Dạ hiện mình chưa thấy dịch vụ khớp với '{search_arg}' trong hệ thống. "
-                "Nhưng Fixago có thể cử thợ đến kiểm tra thực tế và báo phương án, chi phí rõ ràng trước khi làm. "
+                "Dạ giá của Fixago tùy theo hạng mục và tình trạng thực tế, thợ sẽ báo rõ trước khi làm. "
                 "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
             )
 
@@ -121,20 +121,21 @@ def handle_get_services(search_arg: str, messages: List[Dict], used_tools: List[
             return (
                 "Dạ Fixago có các dịch vụ phù hợp với nhu cầu của bạn.\n\n"
                 f"{summary}\n\n"
-                "Chi phí thực tế có thể thay đổi theo tình trạng tại nhà, nhưng thợ sẽ báo rõ trước khi làm. "
+                "Dạ giá của Fixago tùy theo hạng mục và tình trạng thực tế, thợ sẽ báo rõ trước khi làm. "
                 "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
             )
 
         return (
             "Dạ Fixago có thể hỗ trợ tình trạng này. "
-            "Hiện hạng mục này cần thợ kiểm tra thực tế để báo chi phí chính xác trước khi làm. "
+            "Dạ giá của Fixago tùy theo hạng mục và tình trạng thực tế, thợ sẽ báo rõ trước khi làm. "
             "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
         )
 
     except Exception as exc:
         return (
             f"Dạ hiện mình chưa lấy được bảng giá do lỗi hệ thống: {exc}. "
-            "Bạn có thể để lại thông tin, Fixago sẽ hỗ trợ kiểm tra và báo giá rõ ràng trước khi làm ạ."
+            "Dạ giá của Fixago tùy theo hạng mục và tình trạng thực tế, thợ sẽ báo rõ trước khi làm. "
+            "Bạn có thể để lại thông tin, Fixago sẽ hỗ trợ kiểm tra lại ạ."
         )
 
 

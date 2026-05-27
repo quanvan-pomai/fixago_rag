@@ -589,7 +589,14 @@ SCENARIOS = [
         name="06. Hỏi giá ổ cắm",
         tags=["tool", "price", "vi"],
         turns=[
-            T("Ổ cắm nhà tôi bị cháy đen, sửa hết bao nhiêu?", E(checks=["price_present", "service_answer"], tool_contains_any=["dịch vụ", "services"])),
+            T(
+                "Ổ cắm nhà tôi bị cháy đen, sửa hết bao nhiêu?",
+                E(
+                    contains_all=["Dạ giá của Fixago tùy theo hạng mục và tình trạng thực tế"],
+                    checks=["price_present", "service_answer"],
+                    tool_contains_any=["dịch vụ", "services"],
+                ),
+            ),
         ],
     ),
     Scenario(
@@ -847,6 +854,52 @@ SCENARIOS = [
         tags=["identity", "en"],
         turns=[
             T("Who are you and what can your company do?", E(contains_all=["Fixago"], contains_any=["AI assistant", "Trợ lý AI", "home repair", "sửa chữa", "book", "đặt thợ", "technician", "thợ"])),
+        ],
+    ),
+    Scenario(
+        name="38A. Tên công ty không dấu",
+        tags=["identity", "company", "noaccent"],
+        turns=[
+            T(
+                "Cong ty cua ban ten gi",
+                E(
+                    contains_all=["Fixago", "điện", "nước"],
+                    contains_any=["công ty", "sửa chữa", "điện lạnh", "máy lạnh"],
+                    not_contains_any=["Bạn tên Fixago", "Ban ten Fixago", "công ty tôi tên Fixago", "cong ty toi ten Fixago"],
+                    max_len=220,
+                ),
+            ),
+        ],
+    ),
+    Scenario(
+        name="38B. Tên công ty tiếng Việt",
+        tags=["identity", "company", "vi"],
+        turns=[
+            T(
+                "Công ty của bạn tên gì?",
+                E(
+                    contains_all=["Fixago", "điện", "nước"],
+                    contains_any=["công ty", "sửa chữa", "điện lạnh", "máy lạnh"],
+                    not_contains_any=["Bạn tên Fixago", "công ty tôi tên Fixago"],
+                    max_len=220,
+                ),
+            ),
+        ],
+    ),
+    Scenario(
+        name="38C. Giá chung và chất lượng không được bịa",
+        tags=["price", "quality", "company", "vi"],
+        turns=[
+            T(
+                "Giá bên bạn thế nào? Tốt không",
+                E(
+                    contains_all=["Fixago", "Dạ giá của Fixago tùy theo hạng mục và tình trạng thực tế"],
+                    contains_any=["tùy", "hạng mục", "báo rõ", "thợ", "điện", "nước", "máy lạnh"],
+                    not_contains_any=["dữ liệu cá nhân", "không có khả năng truy cập", "không thể cung cấp thông tin"],
+                    checks=["no_fake_policy", "no_booking_attempt"],
+                    max_len=280,
+                ),
+            ),
         ],
     ),
     Scenario(

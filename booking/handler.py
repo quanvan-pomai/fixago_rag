@@ -119,6 +119,8 @@ def build_booking_response(query: str, history: List[Dict]) -> Optional[str]:
         from booking.extractor import extract_booking_from_text as _ex
         _cur = _ex(query)
         _has_contact_data = bool(_cur.get("phone") or _cur.get("name") or _cur.get("address"))
+        if _cur.get("name") and _cur.get("phone") and _cur.get("address"):
+            has_intent = True
 
         for turn in reversed(history[-6:]):
             role = turn.get("role", "")
@@ -130,7 +132,7 @@ def build_booking_response(query: str, history: List[Dict]) -> Optional[str]:
                 break  # stop looking regardless — either we inherit or the flow was interrupted
             # Assistant invited to book AND current query has contact data
             if role == "assistant" and any(h in content.lower() for h in _BOOKING_INVITE_HINTS):
-                if _has_contact_data:
+                if _has_contact_data or detect_confirmation(query):
                     has_intent = True
                     break
             # User previously expressed booking intent AND current query looks like contact/confirm
