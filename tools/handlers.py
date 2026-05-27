@@ -73,8 +73,24 @@ def fetch_raw_groups() -> List[Dict]:
 
 
 def fetch_raw_services(search_arg: str) -> List[Dict]:
-    """Return raw service list for search_arg, or [] on error."""
+    """
+    Return raw service list for search_arg, or [] on error.
+    search_arg="all" fetches a broad sample across multiple categories.
+    """
     try:
+        # Special case: fetch overview across categories for generic price queries
+        if search_arg == "all":
+            all_services = []
+            for keyword in ["điện", "nước", "máy lạnh", "xây dựng"]:
+                resp = requests.get(
+                    f"{BACKEND_URL}/services",
+                    params={"search": keyword, "limit": 3, "isActive": True},
+                    timeout=3,
+                )
+                if resp.status_code == 200:
+                    all_services.extend(resp.json().get("data", []))
+            return all_services
+
         resp = requests.get(
             f"{BACKEND_URL}/services",
             params={"search": search_arg, "limit": 10},
@@ -105,18 +121,49 @@ def fetch_raw_promotions() -> List[Dict]:
     return []
 
 
+def _fmt(price: int) -> str:
+    return f"{price:,}".replace(",", ".") + " VNĐ"
+
+
 def format_services_for_llm(services: List[Dict], search_arg: str = "") -> str:
-    """Convert raw service list into a compact, LLM-readable fact block."""
+    """
+    Convert raw service list into a compact, LLM-readable fact block.
+    Includes a price range summary so the LLM can lead with it.
+    When search_arg='all', groups output by service category.
+    """
     if not services:
         return f"Không tìm thấy dịch vụ khớp với '{search_arg}' trong hệ thống."
-    lines = [f"Danh sách dịch vụ hệ thống ({search_arg}):"]
-    for s in services[:8]:
+
+    priced   = [s for s in services if int(float(s.get("unitPrice") or 0)) > 0]
+    unpriced = [s for s in services if int(float(s.get("unitPrice") or 0)) == 0]
+
+    header = "Tổng quan giá dịch vụ Fixago:" if search_arg == "all" else f"Dịch vụ {search_arg} — dữ liệu từ hệ thống:"
+    lines = [header]
+
+    # Price range summary — lead with this for price questions
+    if priced:
+        prices = [int(float(s.get("unitPrice") or 0)) for s in priced]
+        lo, hi = min(prices), max(prices)
+        if lo == hi:
+            lines.append(f"Giá tham khảo: {_fmt(lo)}")
+        else:
+            lines.append(f"Khoảng giá tham khảo: {_fmt(lo)} – {_fmt(hi)}")
+
+    # Individual items (limit to keep prompt short for 3B model)
+    limit = 10 if search_arg == "all" else 8
+    for s in services[:limit]:
         price = int(float(s.get("unitPrice") or 0))
         name  = s.get("name", "Dịch vụ")
         time_ = s.get("estimatedTime") or 0
-        price_str = f"{price:,}".replace(",", ".") + " VNĐ" if price > 0 else "Báo giá thực tế"
+        price_str = _fmt(price) if price > 0 else "Báo giá thực tế"
         time_str  = f", ~{time_} phút" if time_ else ""
         lines.append(f"- {name}: {price_str}{time_str}")
+
+    if unpriced:
+        names = ", ".join(s.get("name", "") for s in unpriced[:3])
+        lines.append(f"Hạng mục cần khảo sát thực tế: {names}.")
+
+    lines.append("(Giá trên là tham khảo; thợ báo chính xác trước khi làm.)")
     return "\n".join(lines)
 
 

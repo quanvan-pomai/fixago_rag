@@ -227,6 +227,22 @@ def _detect_tool_intent(query: str):
     ]):
         return "CALL_TOOL: get_promotions()"
 
+    # ── Generic price query (no specific service mentioned) ───────────────────
+    # e.g. "giá cả thế nào", "bảng giá", "chi phí ra sao", "giá dịch vụ"
+    _GENERIC_PRICE = [
+        "giá cả", "bảng giá", "giá dịch vụ",
+        "chi phí dịch vụ", "giá các dịch vụ", "dịch vụ giá",
+        "các loại giá", "giá chung", "mức giá",
+        "price list", "service price", "how much for",
+    ]
+    _GENERIC_PRICE_NOACCENT = [
+        "gia ca", "bang gia", "gia dich vu", "chi phi dich vu",
+        "gia cac dich vu", "muc gia", "bao gia",
+    ]
+    _raw_lower = raw.lower()
+    if any(k in q for k in _GENERIC_PRICE) or any(k in _raw_lower for k in _GENERIC_PRICE_NOACCENT):
+        return "CALL_TOOL: get_services(search=\"all\")"
+
     # ── Service groups (what does Fixago offer) ───────────────────────────────
     _GROUP_PATTERNS = [
         # VI accented
@@ -805,6 +821,21 @@ def _detect_user_language(text: str) -> str:
     return "en" if len(en_words) > len(vi_words) else "vi"
 
 
+def _is_price_question(query: str) -> bool:
+    """Return True if the query is primarily asking about price/cost (not reporting a symptom)."""
+    q = query.lower()
+    price_signals = [
+        "bao nhiêu", "bao nhieu", "bao tien", "bao tiền",
+        "giá", "gia ca", "gia bao", "chi phí", "chi phi",
+        "tốn", "ton bao", "ton khoang", "mất bao", "mat bao",
+        "phí", "phi", "tiền", "tien",
+        "how much", "price", "cost", "fee", "charge",
+        "khoảng bao", "khoang bao", "thường tốn", "thuong ton",
+        "trung bình", "trung binh", "estimate",
+    ]
+    return any(s in q for s in price_signals)
+
+
 def _llm_with_injected_data(
     query: str,
     data_block: str,
@@ -813,35 +844,56 @@ def _llm_with_injected_data(
 ) -> str:
     """
     Inject backend data as a mandatory fact context, then let LLM answer naturally.
-    Uses a structured few-shot-style prompt so model 3B stays grounded to the data.
+    Prompt adapts based on whether query is a price question or symptom/general question.
     """
-    if user_lang == "en":
-        instruction = (
-            f"SYSTEM DATA (use only this, do not invent):\n{data_block}\n\n"
-            f"Customer question: {query}\n\n"
-            f"Instructions: Answer naturally in 2-3 sentences using ONLY the data above. "
-            f"If data contains prices, mention the price range and say the technician will confirm exact cost on-site. "
-            f"If data shows 'Báo giá thực tế', say it needs on-site assessment. "
-            f"End with an invitation to book or ask for more details. "
-            f"Do NOT invent any information not in the data."
-        )
-    else:
-        # Vietnamese — structured prompt with explicit do/don't for 3B model
-        instruction = (
-            f"DỮ LIỆU HỆ THỐNG (chỉ dùng thông tin này, không bịa thêm):\n"
-            f"{data_block}\n\n"
-            f"Khách hỏi: {query}\n\n"
-            f"Trả lời theo đúng quy tắc:\n"
-            f"- Ngắn gọn 2-3 câu, giọng thân thiện (dùng 'mình', 'bạn', 'dạ')\n"
-            f"- Nếu có giá trong dữ liệu: nêu khoảng giá tham khảo, nói thợ báo chính xác trước khi làm\n"
-            f"- Nếu dữ liệu ghi 'Báo giá thực tế': nói cần thợ đến kiểm tra mới báo được\n"
-            f"- Nếu dữ liệu là danh sách dịch vụ: tóm tắt tự nhiên, không đọc máy móc\n"
-            f"- Nếu dữ liệu trống: thành thật nói chưa có thông tin, mời đặt thợ kiểm tra\n"
-            f"- Kết thúc: mời đặt lịch hoặc hỏi thêm phù hợp\n"
-            f"- KHÔNG bịa giá, tên dịch vụ, hay thông tin không có trong dữ liệu trên\n"
-        )
+    is_price_q = _is_price_question(query)
 
-    # Keep conversation history but replace last user turn with enriched version
+    if user_lang == "en":
+        if is_price_q:
+            instruction = (
+                f"SYSTEM DATA:\n{data_block}\n\n"
+                f"Customer: {query}\n\n"
+                f"Answer: Lead with the price range from the data above (e.g. 'Typically X–Y VND'). "
+                f"List 2-3 common services with their prices. "
+                f"End with: technician will confirm exact cost on-site. "
+                f"Do NOT say 'need to check' if prices are already in the data. "
+                f"Do NOT invent prices."
+            )
+        else:
+            instruction = (
+                f"SYSTEM DATA:\n{data_block}\n\n"
+                f"Customer: {query}\n\n"
+                f"Answer naturally in 2-3 sentences using ONLY the data above. "
+                f"If data has prices, mention the range. "
+                f"If data shows 'Báo giá thực tế', say it needs on-site assessment. "
+                f"End with invitation to book or ask more. Do NOT invent information."
+            )
+    else:
+        if is_price_q:
+            instruction = (
+                f"DỮ LIỆU HỆ THỐNG:\n{data_block}\n\n"
+                f"Khách hỏi: {query}\n\n"
+                f"Trả lời TẬP TRUNG VÀO GIÁ theo đúng quy tắc:\n"
+                f"- Câu đầu: nêu ngay khoảng giá tham khảo có trong dữ liệu (ví dụ: 'Giá tham khảo từ X đến Y VNĐ')\n"
+                f"- Liệt kê 2-3 dịch vụ phổ biến kèm giá cụ thể từ dữ liệu\n"
+                f"- Nếu dữ liệu ĐÃ CÓ GIÁ thì KHÔNG được nói 'cần kiểm tra thực tế mới biết'\n"
+                f"- Chỉ nói 'cần kiểm tra' với hạng mục ghi 'Báo giá thực tế' trong dữ liệu\n"
+                f"- Câu cuối: nhắc thợ sẽ báo chính xác trước khi làm + mời đặt lịch\n"
+                f"- Giọng thân thiện: 'mình', 'bạn', 'dạ' — KHÔNG bịa thêm giá\n"
+            )
+        else:
+            instruction = (
+                f"DỮ LIỆU HỆ THỐNG (chỉ dùng thông tin này, không bịa thêm):\n"
+                f"{data_block}\n\n"
+                f"Khách hỏi: {query}\n\n"
+                f"Trả lời theo đúng quy tắc:\n"
+                f"- Ngắn gọn 2-3 câu, giọng thân thiện (dùng 'mình', 'bạn', 'dạ')\n"
+                f"- Nếu có giá trong dữ liệu: nêu khoảng giá tham khảo\n"
+                f"- Nếu dữ liệu ghi 'Báo giá thực tế': nói cần thợ đến kiểm tra\n"
+                f"- Kết thúc: mời đặt lịch hoặc hỏi thêm\n"
+                f"- KHÔNG bịa giá hay thông tin không có trong dữ liệu\n"
+            )
+
     llm_messages = messages[:-1] + [{"role": "user", "content": instruction}]
     return llm_chat(llm_messages, temperature=0.1)
 
