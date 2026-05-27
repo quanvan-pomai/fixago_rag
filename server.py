@@ -44,9 +44,13 @@ from tools.handlers import (
     handle_get_groups, handle_get_promotions, handle_get_services,
     fetch_raw_groups, fetch_raw_services, fetch_raw_promotions,
     format_groups_for_llm, format_services_for_llm, format_promotions_for_llm,
+    init_cache as _init_tools_cache,
 )
 
 load_dotenv()
+
+# Inject shared cache into tools so API responses are cached automatically
+_init_tools_cache(rag_engine.cache)
 
 # ── Feature flags ─────────────────────────────────────────────────────────────
 # Set ENABLE_NATIVE_TOOL_CALL=1 when cheese-server is started with --jinja.
@@ -869,18 +873,31 @@ def _llm_with_injected_data(
                 f"End with invitation to book or ask more. Do NOT invent information."
             )
     else:
+        # Check if data_block actually contains prices to guide the prompt
+        has_price_data = any(c.isdigit() for c in data_block) and "VNĐ" in data_block
+
         if is_price_q:
-            instruction = (
-                f"DỮ LIỆU HỆ THỐNG:\n{data_block}\n\n"
-                f"Khách hỏi: {query}\n\n"
-                f"Trả lời TẬP TRUNG VÀO GIÁ theo đúng quy tắc:\n"
-                f"- Câu đầu: nêu ngay khoảng giá tham khảo có trong dữ liệu (ví dụ: 'Giá tham khảo từ X đến Y VNĐ')\n"
-                f"- Liệt kê 2-3 dịch vụ phổ biến kèm giá cụ thể từ dữ liệu\n"
-                f"- Nếu dữ liệu ĐÃ CÓ GIÁ thì KHÔNG được nói 'cần kiểm tra thực tế mới biết'\n"
-                f"- Chỉ nói 'cần kiểm tra' với hạng mục ghi 'Báo giá thực tế' trong dữ liệu\n"
-                f"- Câu cuối: nhắc thợ sẽ báo chính xác trước khi làm + mời đặt lịch\n"
-                f"- Giọng thân thiện: 'mình', 'bạn', 'dạ' — KHÔNG bịa thêm giá\n"
-            )
+            if has_price_data:
+                instruction = (
+                    f"DỮ LIỆU GIÁ TỪ HỆ THỐNG (đây là thông tin thật, dùng ngay):\n"
+                    f"{data_block}\n\n"
+                    f"Khách hỏi: {query}\n\n"
+                    f"QUAN TRỌNG: Dữ liệu trên ĐÃ CÓ GIÁ. Tuyệt đối KHÔNG nói 'chưa có thông tin' hay 'cần kiểm tra thực tế'.\n"
+                    f"Trả lời:\n"
+                    f"1. Câu đầu: nêu ngay khoảng giá tham khảo từ dữ liệu (vd: 'Giá tham khảo từ X đến Y VNĐ')\n"
+                    f"2. Liệt kê 2-3 dịch vụ phổ biến kèm giá cụ thể\n"
+                    f"3. Câu cuối: nhắc thợ báo chính xác trước khi làm + mời đặt lịch\n"
+                    f"Giọng: 'mình', 'bạn', 'dạ'. KHÔNG bịa thêm giá ngoài dữ liệu.\n"
+                )
+            else:
+                instruction = (
+                    f"DỮ LIỆU HỆ THỐNG:\n{data_block}\n\n"
+                    f"Khách hỏi: {query}\n\n"
+                    f"Dữ liệu chưa có giá cụ thể. Trả lời:\n"
+                    f"- Nói giá phụ thuộc tình trạng thực tế, thợ sẽ báo sau khi kiểm tra\n"
+                    f"- Mời đặt lịch để được tư vấn và báo giá tại nhà\n"
+                    f"- Ngắn gọn 2 câu, giọng 'mình', 'bạn', 'dạ'\n"
+                )
         else:
             instruction = (
                 f"DỮ LIỆU HỆ THỐNG (chỉ dùng thông tin này, không bịa thêm):\n"

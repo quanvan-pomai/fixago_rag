@@ -5,16 +5,60 @@ Executes the three read-only Fixago tools by calling the backend API.
 Responses are formatted directly (no LLM round-trip) for speed.
 LLM summarization is only used as a fallback when the response needs
 free-form prose (e.g. when backend data is rich/unexpected).
+
+Caching strategy:
+  Services and groups change rarely → cached in PomaiCache with a long TTL.
+  Cache key: "svc_cache:<search_arg>" / "grp_cache" / "promo_cache"
+  TTL: 30 min for services/groups, 10 min for promotions (may change more often).
+  On cache miss: fetch from backend, store result.
+  Cache is injected at module level via init_cache(); falls back to no-cache if not set.
 """
+import json
 import logging
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import requests
 
 logger = logging.getLogger("fixago.tools_handlers")
 
 BACKEND_URL = os.environ.get("BACKEND_API_URL", "http://127.0.0.1:3001/api/v1")
+
+# ── Cache injection ───────────────────────────────────────────────────────────
+# Populated by server.py after rag_engine is initialized.
+_cache = None
+
+def init_cache(cache_store) -> None:
+    """Inject the shared PomaiCache instance so handlers can cache API responses."""
+    global _cache
+    _cache = cache_store
+
+_SVC_TTL_MS   = 30 * 60 * 1000   # 30 minutes — services rarely change
+_GRP_TTL_MS   = 30 * 60 * 1000   # 30 minutes
+_PROMO_TTL_MS = 10 * 60 * 1000   # 10 minutes — promos change more often
+
+
+def _cache_get(key: str) -> Optional[List]:
+    """Return cached JSON list, or None on miss/error."""
+    if _cache is None:
+        return None
+    try:
+        val = _cache.get(key)
+        if val:
+            return json.loads(val.decode("utf-8"))
+    except Exception:
+        pass
+    return None
+
+
+def _cache_set(key: str, data: List, ttl_ms: int) -> None:
+    """Store a JSON-serialisable list in the cache."""
+    if _cache is None:
+        return
+    try:
+        _cache.set(key, json.dumps(data, ensure_ascii=False).encode("utf-8"), ttl_ms=ttl_ms)
+    except Exception as exc:
+        logger.debug("cache_set failed for %s: %s", key, exc)
 
 
 # ── Price formatting helper ───────────────────────────────────────────────────
@@ -59,14 +103,22 @@ def _build_price_summary(services: List[Dict]) -> str:
     return "\n".join(lines)
 
 
-# ── Raw data fetchers (return dict/list, no formatting) ───────────────────────
+# ── Raw data fetchers (cached → backend) ─────────────────────────────────────
 
 def fetch_raw_groups() -> List[Dict]:
-    """Return raw group list from backend, or [] on error."""
+    """Return raw group list. Served from cache when available."""
+    cache_key = "grp_cache"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        logger.debug("cache HIT: %s", cache_key)
+        return cached
+
     try:
         resp = requests.get(f"{BACKEND_URL}/services/groups", timeout=3)
         if resp.status_code == 200:
-            return resp.json() or []
+            data = resp.json() or []
+            _cache_set(cache_key, data, _GRP_TTL_MS)
+            return data
     except Exception as exc:
         logger.warning("fetch_raw_groups error: %s", exc)
     return []
@@ -74,13 +126,19 @@ def fetch_raw_groups() -> List[Dict]:
 
 def fetch_raw_services(search_arg: str) -> List[Dict]:
     """
-    Return raw service list for search_arg, or [] on error.
+    Return raw service list for search_arg. Served from cache when available.
     search_arg="all" fetches a broad sample across multiple categories.
     """
+    cache_key = f"svc_cache:{search_arg}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        logger.debug("cache HIT: %s", cache_key)
+        return cached
+
     try:
-        # Special case: fetch overview across categories for generic price queries
         if search_arg == "all":
-            all_services = []
+            # Fetch overview sample across all major categories
+            all_services: List[Dict] = []
             for keyword in ["điện", "nước", "máy lạnh", "xây dựng"]:
                 resp = requests.get(
                     f"{BACKEND_URL}/services",
@@ -89,6 +147,7 @@ def fetch_raw_services(search_arg: str) -> List[Dict]:
                 )
                 if resp.status_code == 200:
                     all_services.extend(resp.json().get("data", []))
+            _cache_set(cache_key, all_services, _SVC_TTL_MS)
             return all_services
 
         resp = requests.get(
@@ -98,11 +157,16 @@ def fetch_raw_services(search_arg: str) -> List[Dict]:
         )
         if resp.status_code == 200:
             services = resp.json().get("data", [])
-            # Fallback for appliance types that share the "điện" group
+            # Fallback: appliance types share the "điện" group
             if not services and search_arg in {"máy lạnh", "điện lạnh", "máy giặt"}:
-                fb = requests.get(f"{BACKEND_URL}/services", params={"search": "điện", "limit": 10}, timeout=3)
+                fb = requests.get(
+                    f"{BACKEND_URL}/services",
+                    params={"search": "điện", "limit": 10},
+                    timeout=3,
+                )
                 if fb.status_code == 200:
                     services = fb.json().get("data", [])
+            _cache_set(cache_key, services, _SVC_TTL_MS)
             return services
     except Exception as exc:
         logger.warning("fetch_raw_services error: %s", exc)
@@ -110,12 +174,20 @@ def fetch_raw_services(search_arg: str) -> List[Dict]:
 
 
 def fetch_raw_promotions() -> List[Dict]:
-    """Return raw promotion list from backend, or [] on error."""
+    """Return raw promotion list. Served from cache when available."""
+    cache_key = "promo_cache"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        logger.debug("cache HIT: %s", cache_key)
+        return cached
+
     try:
         resp = requests.get(f"{BACKEND_URL}/discounts/available", timeout=3)
         if resp.status_code == 200:
-            raw = resp.json()
-            return raw if isinstance(raw, list) else raw.get("data", [])
+            raw  = resp.json()
+            data = raw if isinstance(raw, list) else raw.get("data", [])
+            _cache_set(cache_key, data, _PROMO_TTL_MS)
+            return data
     except Exception as exc:
         logger.warning("fetch_raw_promotions error: %s", exc)
     return []
