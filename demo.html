@@ -6,28 +6,22 @@
     <title>Fixago AI Assistant</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         :root {
             --primary: #ff6b00;
             --primary-2: #ff8a00;
             --primary-3: #ffb800;
             --bg: #0f1115;
-            --bg-soft: #151922;
-            --panel: rgba(20, 23, 31, 0.78);
-            --panel-strong: rgba(20, 23, 31, 0.92);
+            --panel: rgba(20, 23, 31, 0.86);
+            --panel-strong: rgba(15, 17, 21, 0.92);
             --line: rgba(255, 255, 255, 0.08);
             --line-strong: rgba(255, 255, 255, 0.14);
             --text: #ffffff;
             --muted: #9ca3af;
-            --muted-2: #6b7280;
-            --danger: #ff5c5c;
-            --success: #22c55e;
-            --shadow: 0 22px 60px rgba(0, 0, 0, 0.32);
-            --content: min(100%, 880px);
+            --content: min(100%, 900px);
             --side-pad: clamp(12px, 4vw, 28px);
-            --bubble-pad-x: clamp(14px, 2vw, 22px);
-            --bubble-pad-y: clamp(12px, 1.8vw, 16px);
+            --input-height: 82px;
             color-scheme: dark;
         }
 
@@ -44,15 +38,13 @@
             margin: 0;
             height: 100%;
             min-height: 100dvh;
+            overflow: hidden;
             font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             color: var(--text);
             background:
                 radial-gradient(circle at 86% 0%, rgba(255, 107, 0, 0.18), transparent 34%),
                 radial-gradient(circle at 0% 96%, rgba(255, 138, 0, 0.1), transparent 36%),
                 linear-gradient(145deg, #0b0d11 0%, #10131a 48%, #0f1115 100%);
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
         }
 
         button,
@@ -65,22 +57,19 @@
         }
 
         .app-shell {
-            height: 100%;
-            min-height: 100dvh;
-            display: flex;
-            flex-direction: column;
+            height: 100dvh;
+            max-height: 100dvh;
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr) auto;
             overflow: hidden;
         }
 
         .header {
-            flex: 0 0 auto;
-            width: 100%;
             border-bottom: 1px solid var(--line);
-            background: rgba(15, 17, 21, 0.72);
+            background: rgba(15, 17, 21, 0.74);
             backdrop-filter: blur(18px);
             -webkit-backdrop-filter: blur(18px);
-            position: relative;
-            z-index: 5;
+            z-index: 30;
         }
 
         .header-inner {
@@ -91,6 +80,7 @@
             align-items: center;
             justify-content: space-between;
             gap: 14px;
+            min-width: 0;
         }
 
         .brand {
@@ -122,7 +112,7 @@
             font-size: clamp(18px, 3.7vw, 25px);
             line-height: 1.1;
             letter-spacing: -0.03em;
-            font-weight: 750;
+            font-weight: 800;
             background: linear-gradient(90deg, var(--primary), var(--primary-3));
             -webkit-background-clip: text;
             color: transparent;
@@ -151,7 +141,7 @@
             padding: 8px 12px;
             border-radius: 999px;
             font-size: 12px;
-            font-weight: 650;
+            font-weight: 700;
             white-space: nowrap;
         }
 
@@ -165,7 +155,7 @@
             cursor: pointer;
             transition: transform 0.18s ease, background 0.18s ease, border-color 0.18s ease;
             font-size: 13px;
-            font-weight: 650;
+            font-weight: 700;
             white-space: nowrap;
         }
 
@@ -176,38 +166,44 @@
         }
 
         .main {
-            flex: 1 1 auto;
             min-height: 0;
-            display: flex;
-            justify-content: center;
             overflow: hidden;
+            position: relative;
+        }
+
+        .chat-scroll {
+            height: 100%;
+            min-height: 0;
+            overflow-y: auto;
+            overflow-x: hidden;
+            overscroll-behavior: contain;
+            -webkit-overflow-scrolling: touch;
+            scroll-behavior: smooth;
+        }
+
+        .chat-scroll::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .chat-scroll::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .chat-scroll::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.14);
+            border-radius: 999px;
+            border: 2px solid transparent;
+            background-clip: padding-box;
         }
 
         .chat-container {
             width: var(--content);
-            min-height: 0;
-            padding: clamp(16px, 3vw, 28px) var(--side-pad);
-            overflow-y: auto;
+            min-height: 100%;
+            margin: 0 auto;
+            padding: clamp(16px, 3vw, 28px) var(--side-pad) 24px;
             display: flex;
             flex-direction: column;
             gap: clamp(12px, 2.2vw, 20px);
-            scroll-behavior: smooth;
-            overscroll-behavior: contain;
-        }
-
-        .chat-container::-webkit-scrollbar {
-            width: 8px;
-        }
-
-        .chat-container::-webkit-scrollbar-track {
-            background: transparent;
-        }
-
-        .chat-container::-webkit-scrollbar-thumb {
-            background: rgba(255, 255, 255, 0.12);
-            border-radius: 999px;
-            border: 2px solid transparent;
-            background-clip: padding-box;
         }
 
         .message-row {
@@ -227,7 +223,7 @@
 
         .message {
             max-width: min(82%, 680px);
-            padding: var(--bubble-pad-y) var(--bubble-pad-x);
+            padding: clamp(12px, 1.8vw, 16px) clamp(14px, 2vw, 22px);
             border-radius: 22px;
             line-height: 1.62;
             font-size: clamp(14px, 2.3vw, 15px);
@@ -247,7 +243,6 @@
             border: 1px solid var(--line);
             border-bottom-left-radius: 7px;
             box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
-            white-space: normal;
         }
 
         .message.bot strong {
@@ -281,18 +276,26 @@
             line-height: 1.5;
         }
 
-        .typing-row {
-            display: none;
-            justify-content: flex-start;
-            width: 100%;
+        .typing-fixed {
+            position: absolute;
+            left: 50%;
+            bottom: 12px;
+            transform: translateX(-50%) translateY(12px);
+            width: var(--content);
+            padding: 0 var(--side-pad);
+            z-index: 20;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.18s ease, transform 0.18s ease;
         }
 
-        .typing-row.active {
-            display: flex;
+        .typing-fixed.active {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
         }
 
         .typing-card {
-            display: flex;
+            display: inline-flex;
             align-items: center;
             gap: 12px;
             padding: 13px 16px;
@@ -300,7 +303,10 @@
             border-radius: 22px;
             border-bottom-left-radius: 7px;
             border: 1px solid var(--line);
-            background: rgba(255, 255, 255, 0.045);
+            background: rgba(24, 27, 36, 0.94);
+            box-shadow: 0 16px 38px rgba(0, 0, 0, 0.32);
+            backdrop-filter: blur(18px);
+            -webkit-backdrop-filter: blur(18px);
         }
 
         .typing-dots {
@@ -331,12 +337,11 @@
         }
 
         .input-area {
-            flex: 0 0 auto;
-            width: 100%;
             border-top: 1px solid var(--line);
-            background: rgba(15, 17, 21, 0.8);
+            background: rgba(15, 17, 21, 0.86);
             backdrop-filter: blur(20px);
             -webkit-backdrop-filter: blur(20px);
+            z-index: 30;
         }
 
         .input-inner {
@@ -477,10 +482,6 @@
                 border-radius: 14px;
             }
 
-            .header-actions {
-                gap: 8px;
-            }
-
             .badge {
                 display: none;
             }
@@ -502,10 +503,6 @@
 
             .typing-card {
                 max-width: 92%;
-            }
-
-            .input-inner {
-                gap: 10px;
             }
 
             .send-btn {
@@ -543,21 +540,14 @@
                 line-height: 1.56;
             }
 
-            .message.user {
-                border-bottom-right-radius: 6px;
-            }
-
-            .message.bot {
-                border-bottom-left-radius: 6px;
-            }
-
             .chat-container {
                 padding-top: 14px;
-                padding-bottom: 14px;
+                padding-bottom: 20px;
             }
 
             .input-inner {
                 padding-top: 10px;
+                gap: 10px;
             }
 
             .input-wrapper {
@@ -596,13 +586,6 @@
             }
         }
 
-        @media (min-width: 1100px) {
-            .chat-container {
-                padding-top: 34px;
-                padding-bottom: 34px;
-            }
-        }
-
         @media (prefers-reduced-motion: reduce) {
             *, *::before, *::after {
                 animation-duration: 0.01ms !important;
@@ -632,22 +615,24 @@
         </header>
 
         <main class="main">
-            <section class="chat-container" id="chat" aria-live="polite">
-                <div class="empty-state" id="emptyState">
-                    <h2>Fixago AI Assistant</h2>
-                    <p>Hỏi về dịch vụ sửa điện, nước, máy lạnh, xây dựng, thạch cao hoặc đặt lịch thợ hỗ trợ tại nhà.</p>
-                </div>
-                <div class="typing-row" id="typing">
-                    <div class="typing-card">
-                        <div class="typing-dots">
-                            <div class="dot"></div>
-                            <div class="dot"></div>
-                            <div class="dot"></div>
-                        </div>
-                        <div class="typing-text">AI đang tổng hợp dữ liệu...</div>
+            <div class="chat-scroll" id="chatScroll">
+                <section class="chat-container" id="chat" aria-live="polite">
+                    <div class="empty-state" id="emptyState">
+                        <h2>Fixago AI Assistant</h2>
+                        <p>Hỏi về dịch vụ sửa điện, nước, máy lạnh, xây dựng, thạch cao hoặc đặt lịch thợ hỗ trợ tại nhà.</p>
                     </div>
+                </section>
+            </div>
+            <div class="typing-fixed" id="typing">
+                <div class="typing-card">
+                    <div class="typing-dots">
+                        <div class="dot"></div>
+                        <div class="dot"></div>
+                        <div class="dot"></div>
+                    </div>
+                    <div class="typing-text">AI đang tổng hợp dữ liệu...</div>
                 </div>
-            </section>
+            </div>
         </main>
 
         <footer class="input-area">
@@ -664,6 +649,7 @@
 
     <script>
         const chat = document.getElementById("chat");
+        const chatScroll = document.getElementById("chatScroll");
         const input = document.getElementById("query");
         const sendBtn = document.getElementById("sendBtn");
         const resetBtn = document.getElementById("resetBtn");
@@ -672,6 +658,7 @@
         const sessionKey = "fixago_chat_session";
         let isSending = false;
         let hasBooted = false;
+        let shouldStickToBottom = true;
 
         function createSessionId() {
             if (window.crypto && crypto.randomUUID) {
@@ -689,6 +676,17 @@
             return sessionId;
         }
 
+        function isNearBottom() {
+            return chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 80;
+        }
+
+        function scrollToBottom(force = false) {
+            if (!force && !shouldStickToBottom) return;
+            requestAnimationFrame(() => {
+                chatScroll.scrollTop = chatScroll.scrollHeight;
+            });
+        }
+
         function resetSession() {
             sessionStorage.removeItem(sessionKey);
             clearMessages();
@@ -696,9 +694,11 @@
         }
 
         function clearMessages() {
-            [...chat.querySelectorAll(".message-row")].forEach(node => node.remove());
+            chat.querySelectorAll(".message-row").forEach(node => node.remove());
             emptyState.style.display = "block";
             setTyping(false);
+            shouldStickToBottom = true;
+            scrollToBottom(true);
         }
 
         function setTyping(active) {
@@ -709,13 +709,6 @@
         function setSending(active) {
             isSending = Boolean(active);
             sendBtn.disabled = isSending;
-            input.disabled = isSending;
-        }
-
-        function scrollToBottom() {
-            requestAnimationFrame(() => {
-                chat.scrollTop = chat.scrollHeight;
-            });
         }
 
         function escapeHtml(value) {
@@ -737,6 +730,7 @@
 
         function appendMsg(text, sender) {
             emptyState.style.display = "none";
+            shouldStickToBottom = isNearBottom();
 
             const row = document.createElement("div");
             const msg = document.createElement("div");
@@ -745,6 +739,7 @@
                 row.className = "message-row user-row";
                 msg.className = "message user";
                 msg.textContent = text;
+                shouldStickToBottom = true;
             } else if (sender === "tool") {
                 row.className = "message-row tool-row";
                 msg.className = "message tool";
@@ -756,13 +751,13 @@
             }
 
             row.appendChild(msg);
-            chat.insertBefore(row, typing);
+            chat.appendChild(row);
             scrollToBottom();
         }
 
         function autoResize() {
             input.style.height = "auto";
-            input.style.height = `${Math.min(input.scrollHeight, Math.round(window.innerHeight * 0.3))}px`;
+            input.style.height = `${Math.min(input.scrollHeight, Math.round(window.innerHeight * 0.28))}px`;
         }
 
         async function queryAssistant(text) {
@@ -840,6 +835,10 @@
             }
         }
 
+        chatScroll.addEventListener("scroll", () => {
+            shouldStickToBottom = isNearBottom();
+        });
+
         input.addEventListener("input", autoResize);
 
         input.addEventListener("keydown", event => {
@@ -852,7 +851,11 @@
         sendBtn.addEventListener("click", sendMsg);
         resetBtn.addEventListener("click", resetSession);
 
-        window.addEventListener("resize", autoResize);
+        window.addEventListener("resize", () => {
+            autoResize();
+            scrollToBottom(true);
+        });
+
         window.addEventListener("load", () => bootAssistant(false));
     </script>
 </body>

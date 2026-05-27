@@ -447,10 +447,57 @@ def _run_native_tool_path(query: str, history: list, messages: list, used_tools:
     return tool_result
 
 
+def _split_questions(query: str) -> list[str]:
+    """
+    Split a multi-question message into individual sub-questions.
+    Returns [query] unchanged if no split is needed.
+
+    Handles patterns like:
+      "Giá điện bao nhiêu? Còn nước thì sao? Có KM không?"
+      "Fixago làm gì, giá ra sao, có KM không"
+      "Sửa máy lạnh bao nhiêu và thời gian làm việc thế nào"
+    """
+    import re as _re
+    raw = (query or "").strip()
+
+    # Split on sentence-ending punctuation followed by a capital/word
+    parts = _re.split(r'(?<=[?!])\s+(?=[A-ZÀ-Ỹa-zà-ỹ])', raw)
+    if len(parts) >= 2:
+        return [p.strip() for p in parts if p.strip()]
+
+    # Split on ", còn ", "; ", comma between distinct question fragments
+    parts = _re.split(
+        r',\s*(?:còn|ngoài ra|thêm nữa|đồng thời)\s+|;\s+',
+        raw, flags=_re.IGNORECASE
+    )
+    if len(parts) >= 2:
+        return [p.strip() for p in parts if p.strip()]
+
+    # Split on plain commas when each segment has its own question signal
+    _Q_SIGNALS2 = ["giá", "bao nhiêu", "gì", "sao", "thế nào", "ra sao",
+                   "không", "có", "làm gì", "dịch vụ", "km", "khuyến mãi"]
+    comma_parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if len(comma_parts) >= 2 and all(
+        any(s in p.lower() for s in _Q_SIGNALS2) for p in comma_parts
+    ):
+        return comma_parts
+
+    # Split on " và " only when both sides look like distinct questions
+    # (each side has a service keyword or question word)
+    _Q_SIGNALS = ["giá", "bao nhiêu", "sửa", "có", "thế nào", "ra sao",
+                  "như thế", "mấy giờ", "thời gian", "khuyến mãi", "dịch vụ"]
+    and_parts = _re.split(r'\s+và\s+', raw, flags=_re.IGNORECASE)
+    if len(and_parts) >= 2:
+        if all(any(s in p.lower() for s in _Q_SIGNALS) for p in and_parts):
+            return [p.strip() for p in and_parts if p.strip()]
+
+    return [raw]
+
+
 def _detect_multi_service(query: str, first_tool: str, messages: list, used_tools: list):
     """
-    If the query mentions two different service categories, call both APIs and
-    return a combined answer string directly (not a CALL_TOOL token).
+    If the query mentions two different service categories with a clear separator,
+    call both APIs and return a combined answer string directly.
     Otherwise return first_tool unchanged.
     """
     q = _normalize_noaccent((query or "").lower())
@@ -467,173 +514,144 @@ def _detect_multi_service(query: str, first_tool: str, messages: list, used_tool
             matched.append(key)
 
     if len(matched) < 2:
-        return first_tool  # single or zero service → normal path
+        return first_tool
 
-    # Avoid false multi-service on compound phrases like "máy giặt bị rò nước"
-    # or contact-info messages like "Tôi tên An, sđt 0909111222, ở 45 Trần Phú. Máy giặt bị rò"
-    # Require an explicit price/question connector between service mentions
     _MULTI_SEPARATORS = [" còn ", " và giá ", " với giá ", " or ", " and ",
-                         "bao nhiêu,", "bao nhiêu còn", "giá còn"]
+                         "bao nhiêu,", "bao nhiêu còn", "giá còn", "ngoài ra", "; "]
     if not any(sep in q for sep in _MULTI_SEPARATORS):
-        return first_tool  # single compound phrase, not a real multi-service query
+        return first_tool
 
-    # Fetch both services and stitch responses
     parts = []
     for svc in matched[:2]:
         result = handle_get_services(svc, messages, used_tools)
-        # Extract just the price line(s) to keep it concise
         lines = [l for l in result.split("\n") if l.strip() and "muốn mình" not in l]
         parts.append(f"**{svc.title()}:** " + " ".join(lines[:3]))
 
-    combined = "\n\n".join(parts) + "\n\nChi phí thực tế thợ sẽ báo rõ trước khi làm. Bạn muốn mình hỗ trợ đặt lịch không ạ?"
-    return combined  # return final string, not CALL_TOOL token
+    return "\n\n".join(parts) + "\n\nChi phí thực tế thợ sẽ báo rõ trước khi làm. Bạn muốn mình hỗ trợ đặt lịch không ạ?"
+
+
+def _resolve_tool_data(sub_query: str, messages: list, used_tools: list) -> str:
+    """
+    For a single sub-question, fetch backend data if needed and return
+    a data string to inject into the LLM prompt, or "" if no tool needed.
+    """
+    tool = _detect_tool_intent(sub_query)
+    if not tool:
+        return ""
+
+    if "get_groups" in tool:
+        return handle_get_groups(messages, used_tools)
+
+    if "get_promotions" in tool:
+        return handle_get_promotions(messages, used_tools)
+
+    if "get_services" in tool:
+        m = re.search(r'search="([^"]*)"', tool)
+        search = normalize_service_search(m.group(1) if m else sub_query)
+        return handle_get_services(search, messages, used_tools)
+
+    return ""
+
+
+def _execute_tool(tool_str: str, messages: list, used_tools: list) -> str:
+    """Execute a CALL_TOOL string and return the result."""
+    if "get_groups" in tool_str:
+        return handle_get_groups(messages, used_tools)
+    if "get_promotions" in tool_str:
+        return handle_get_promotions(messages, used_tools)
+    if "get_services" in tool_str:
+        m = re.search(r'search="([^"]*)"', tool_str)
+        search = normalize_service_search(m.group(1) if m else "")
+        return handle_get_services(search, messages, used_tools)
+    return ""
 
 
 def _run_legacy_tool_path(query: str, history: list, messages: list, used_tools: list) -> str:
-    """Legacy text-based tool detection path (no --jinja needed)."""
+    """
+    Main orchestration path.
 
-    # Tool intent takes priority over booking when not negated
-    forced_tool = _detect_tool_intent(query)
-
-    # Multi-service query: user asks about two different services in one message
-    # e.g. "giá máy lạnh bao nhiêu, còn giá sửa ống nước thì sao?"
-    forced_tool = _detect_multi_service(query, forced_tool, messages, used_tools)
-
-    # Static fallback short-circuits everything (policy/safety/identity/off-topic)
+    Flow:
+      1. Static guardrails (safety / hours / off-topic) → instant return
+      2. Booking confirmation / mid-flow → deterministic booking handler
+      3. Multi-service (two APIs needed) → stitch + return
+      4. Split multi-question → fetch each tool's data, inject all into one LLM call
+      5. Single tool → fetch data, inject as context, LLM summarizes naturally
+      6. No tool → pure LLM with RAG context
+    """
+    # 1. Static guardrails
     static_early = _static_fallback(query)
     if static_early:
         return static_early
 
-    # Booking path — skip if user negated intent or a tool will handle it
-    # A price/service query takes precedence over booking flow inheritance
-    _has_service_tool = forced_tool and "get_services" in str(forced_tool)
-    if not detect_negation(query) and not _has_service_tool:
+    # 2. Booking flow — fully deterministic
+    _hint_tool = _detect_tool_intent(query)
+    _has_service_hint = _hint_tool and "get_services" in str(_hint_tool)
+    if not detect_negation(query) and not _has_service_hint:
         booking_resp = build_booking_response(query, history)
-    else:
-        booking_resp = None
+        if booking_resp:
+            booking_resp = repair_booking_tool_call(booking_resp, query, history)
+            if "create_booking" in booking_resp.lower():
+                return handle_create_booking(booking_resp, used_tools)
+            return booking_resp  # asking for info or showing summary
 
-    # Decide priority: booking CALL_TOOL > promo/groups > booking text > price tool > LLM
-    # Promotion/groups tool always wins over booking (user asking info, not booking)
-    promo_or_groups = forced_tool and any(t in forced_tool for t in ["get_promotions", "get_groups"])
+    # 3. Multi-service shortcut
+    multi_result = _detect_multi_service(query, _hint_tool, messages, used_tools)
+    if multi_result and multi_result != _hint_tool:
+        return multi_result
 
-    # If _detect_multi_service already resolved to a final string, use it directly
-    if forced_tool and not forced_tool.startswith("CALL_TOOL:"):
-        return forced_tool
+    # 4 & 5. Split questions, fetch each tool's data, inject all into LLM
+    sub_questions = _split_questions(query)
+    tool_blocks: list[str] = []
 
-    if booking_resp and "CALL_TOOL: create_booking" in booking_resp:
-        # Confirmed booking execution — highest priority
-        answer = booking_resp
-    elif promo_or_groups:
-        # Promotion/groups query — always dispatch, even mid-booking
-        answer = forced_tool
-    elif booking_resp:
-        # Booking flow in progress (asking for info or showing summary)
-        answer = booking_resp
-    elif forced_tool:
-        answer = forced_tool
-    else:
-        grammar = load_grammar("fixago_tool_call.gbnf")
-        answer  = llm_chat(messages, temperature=0.0, grammar=grammar)
+    for sub_q in sub_questions:
+        tool = _detect_tool_intent(sub_q)
+        if tool and tool.startswith("CALL_TOOL:"):
+            data = _execute_tool(tool, messages, used_tools)
+            if data:
+                tool_blocks.append(data)
 
-    answer = repair_booking_tool_call(answer, query, history)
+    if tool_blocks:
+        # Inject all fetched data so the model answers every part naturally
+        tool_context = "\n\n---\n".join(tool_blocks)
+        enriched = (
+            f"{query}\n\n"
+            f"[Dữ liệu hệ thống:]\n{tool_context}"
+        )
+        llm_messages = messages[:-1] + [{"role": "user", "content": enriched}]
+        return llm_chat(llm_messages, temperature=0.2)
 
-    if "CALL_TOOL: get_groups" in answer:
-        messages.append({"role": "assistant", "content": answer})
-        return handle_get_groups(messages, used_tools)
-
-    if "CALL_TOOL: get_services" in answer:
-        m      = re.search(r'search="([^"]*)"', answer)
-        search = normalize_service_search(m.group(1) if m else "")
-        messages.append({"role": "assistant", "content": answer})
-        svc_result = handle_get_services(search, messages, used_tools)
-        # Append warranty note if query also asked about it
-        q_low = (query or "").lower()
-        if any(k in q_low for k in ["bảo hành", "warranty", "guarantee"]):
-            svc_result = svc_result.rstrip() + "\n\nVề bảo hành: thông tin cụ thể phụ thuộc từng hạng mục, thợ sẽ trao đổi rõ khi đến kiểm tra."
-        # Append comparison note if query compares with competitors
-        if any(k in q_low for k in ["rẻ hơn", "so với", "so sánh", "tốt hơn", "thợ tự do", "compare"]):
-            svc_result = svc_result.rstrip() + "\nThợ Fixago đã được xác minh kỹ năng, báo giá minh bạch trước khi làm — không lo phát sinh."
-        return svc_result
-
-    if "CALL_TOOL: get_promotions" in answer:
-        messages.append({"role": "assistant", "content": answer})
-        promo_result = handle_get_promotions(messages, used_tools)
-        # Append comparison note if query also asks about price vs competitors
-        q_low = (query or "").lower()
-        if any(k in q_low for k in ["rẻ hơn", "so với", "tốt hơn", "thợ tự do", "compare", "cheaper"]):
-            promo_result = promo_result.rstrip() + "\n\nVề chi phí so với thợ tự do: Fixago báo giá minh bạch trước khi làm, thợ đã được xác minh — không lo phát sinh chi phí ngoài ý muốn."
-        return promo_result
-
-    if "create_booking" in answer.lower():
-        return handle_create_booking(answer, used_tools)
-
-    return answer
+    # 6. Pure LLM (conversational, comparison, identity, etc.)
+    return llm_chat(messages, temperature=0.2)
 
 
 def _run_legacy_fast_path(query: str, history: list, messages: list, used_tools: list):
     """
-    Handle deterministic static/booking/tool responses before RAG retrieval or
-    LLM fallback. Returns None when the request needs the model.
+    Pre-RAG fast path: handle static + booking + deterministic tools without
+    calling the LLM. Returns None to signal the main path should continue.
     """
-    forced_tool = _detect_tool_intent(query)
-    forced_tool = _detect_multi_service(query, forced_tool, messages, used_tools)
-
+    # Static guardrails
     static_early = _static_fallback(query)
     if static_early:
         return static_early
 
-    _has_service_tool = forced_tool and "get_services" in str(forced_tool)
-    if not detect_negation(query) and not _has_service_tool:
+    # Booking — fully deterministic, no LLM needed
+    _hint_tool = _detect_tool_intent(query)
+    _has_service_hint = _hint_tool and "get_services" in str(_hint_tool)
+    if not detect_negation(query) and not _has_service_hint:
         booking_resp = build_booking_response(query, history)
-    else:
-        booking_resp = None
+        if booking_resp:
+            booking_resp = repair_booking_tool_call(booking_resp, query, history)
+            if "create_booking" in booking_resp.lower():
+                return handle_create_booking(booking_resp, used_tools)
+            return booking_resp
 
-    promo_or_groups = forced_tool and any(t in forced_tool for t in ["get_promotions", "get_groups"])
+    # Multi-service stitched response
+    multi_result = _detect_multi_service(query, _hint_tool, messages, used_tools)
+    if multi_result and multi_result != _hint_tool:
+        return multi_result
 
-    if forced_tool and not forced_tool.startswith("CALL_TOOL:"):
-        return forced_tool
-
-    if booking_resp and "CALL_TOOL: create_booking" in booking_resp:
-        answer = booking_resp
-    elif promo_or_groups:
-        answer = forced_tool
-    elif booking_resp:
-        answer = booking_resp
-    elif forced_tool:
-        answer = forced_tool
-    else:
-        return None
-
-    answer = repair_booking_tool_call(answer, query, history)
-
-    if "CALL_TOOL: get_groups" in answer:
-        messages.append({"role": "assistant", "content": answer})
-        return handle_get_groups(messages, used_tools)
-
-    if "CALL_TOOL: get_services" in answer:
-        m      = re.search(r'search="([^"]*)"', answer)
-        search = normalize_service_search(m.group(1) if m else "")
-        messages.append({"role": "assistant", "content": answer})
-        svc_result = handle_get_services(search, messages, used_tools)
-        q_low = (query or "").lower()
-        if any(k in q_low for k in ["bảo hành", "warranty", "guarantee"]):
-            svc_result = svc_result.rstrip() + "\n\nVề bảo hành: thông tin cụ thể phụ thuộc từng hạng mục, thợ sẽ trao đổi rõ khi đến kiểm tra."
-        if any(k in q_low for k in ["rẻ hơn", "so với", "so sánh", "tốt hơn", "thợ tự do", "compare"]):
-            svc_result = svc_result.rstrip() + "\nThợ Fixago đã được xác minh kỹ năng, báo giá minh bạch trước khi làm — không lo phát sinh."
-        return svc_result
-
-    if "CALL_TOOL: get_promotions" in answer:
-        messages.append({"role": "assistant", "content": answer})
-        promo_result = handle_get_promotions(messages, used_tools)
-        q_low = (query or "").lower()
-        if any(k in q_low for k in ["rẻ hơn", "so với", "tốt hơn", "thợ tự do", "compare", "cheaper"]):
-            promo_result = promo_result.rstrip() + "\n\nVề chi phí so với thợ tự do: Fixago báo giá minh bạch trước khi làm, thợ đã được xác minh — không lo phát sinh chi phí ngoài ý muốn."
-        return promo_result
-
-    if "create_booking" in answer.lower():
-        return handle_create_booking(answer, used_tools)
-
-    return answer
+    # Everything else needs the LLM — signal to continue
+    return None
 
 
 def _persist_session(session_id: str, session: dict, query: str, answer: str):
