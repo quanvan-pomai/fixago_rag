@@ -234,6 +234,8 @@ def _detect_tool_intent(query: str):
         "fixago làm gì", "bên bạn làm gì", "có sửa gì", "hỗ trợ gì",
         "cung cấp gì", "bao gồm gì", "loại dịch vụ", "hạng mục gì",
         "cung cấp những", "sửa được gì", "làm được gì", "hỗ trợ những gì",
+        "cung cấp dịch vụ", "dịch vụ nào", "hạng mục nào", "sửa gì",
+        "bên bạn có gì", "fixago có gì", "có những gì",
         # VI no-accent (raw, before normalize)
         "dich vu gi", "co dich vu", "nhung dich vu", "nhom dich vu",
         "fixago lam gi", "co sua gi", "ho tro gi", "cung cap gi",
@@ -467,20 +469,25 @@ def _static_fallback(query: str) -> str:
     _HOURS_TOKENS = ["giờ làm", "thời gian làm", "thoi gian lam", "gio lam viec",
                      "working hour", "lam viec may gio", "ban đêm", "ban dem",
                      "cuối tuần", "cuoi tuan", "chủ nhật", "chu nhat",
-                     "ngày lễ", "ngay le", "24/7", "suốt ngày"]
+                     "ngày lễ", "ngay le", "24/7", "suốt ngày",
+                     "mấy giờ", "may gio", "giờ mở", "gio mo", "open"]
     _hours_q = (
         any(k in raw_q for k in _HOURS_TOKENS)
         or _has_tokens(raw_q,
-            ["giờ", "thời gian", "thoi gian", "lúc nào", "luc nao", "open"],
+            ["giờ", "thời gian", "thoi gian", "lúc nào", "luc nao"],
             ["làm việc", "lam viec", "hoạt động", "hoat dong", "phục vụ", "phuc vu"])
     )
     if _hours_q:
-        if _has_tokens(raw_q, ["dịch vụ", "hỗ trợ", "làm gì", "dich vu"]):
-            return (
-                "Dạ Fixago hoạt động 24/7, kể cả cuối tuần và ngày lễ. "
-                "Dịch vụ gồm sửa điện, nước, máy lạnh, xây dựng và thạch cao. "
-                "Bạn cần hỗ trợ hạng mục nào ạ?"
-            )
+        # If query ALSO asks about services, promotions, or price → don't intercept here.
+        # Let _run_legacy_tool_path handle the combo (hours fact + tool data).
+        _has_other_topic = any(k in raw_q for k in [
+            "dịch vụ", "dich vu", "khuyến mãi", "khuyen mai", "promotion",
+            "giá", "gia", "bao nhiêu", "what service", "services",
+            "làm gì", "lam gi", "có gì", "co gi", "hỗ trợ gì",
+        ])
+        if _has_other_topic:
+            return ""   # pass through to tool path
+
         return (
             "Dạ Fixago hoạt động 24/7, kể cả cuối tuần và ngày lễ — "
             "bạn đặt lịch bất kỳ lúc nào, thợ sẽ liên hệ xác nhận thời gian sớm nhất nhé."
@@ -580,6 +587,23 @@ def _run_native_tool_path(query: str, history: list, messages: list, used_tools:
     return tool_result
 
 
+# Hours fact — a hardcoded answer segment injected when a sub-question asks about schedule
+_HOURS_FACT = "Fixago hoạt động 24/7, kể cả cuối tuần và ngày lễ."
+
+# Keywords that signal a sub-question is about working hours
+_HOURS_KEYWORDS = [
+    "giờ làm", "thời gian", "mấy giờ", "giờ mở", "làm việc",
+    "hoạt động", "cuối tuần", "chủ nhật", "ngày lễ", "ban đêm",
+    "lúc nào", "24/7", "working hour", "open", "schedule",
+    "gio lam", "thoi gian", "may gio", "gio mo", "cuoi tuan",
+]
+
+def _is_hours_question(text: str) -> bool:
+    """Return True if the text is primarily asking about working hours/schedule."""
+    t = text.lower()
+    return any(k in t for k in _HOURS_KEYWORDS)
+
+
 def _split_questions(query: str) -> list[str]:
     """
     Split a multi-question message into individual sub-questions.
@@ -588,9 +612,9 @@ def _split_questions(query: str) -> list[str]:
     Handles common Vietnamese/English patterns:
       "Giá điện bao nhiêu? Còn nước thì sao? Có KM không?"
       "Fixago làm gì, giá ra sao, có KM không"
-      "Sửa máy lạnh bao nhiêu và giá nước thế nào"
-      "Máy lạnh nhà mình hỏng, còn ống nước thì nghẹt nữa"
+      "Dịch vụ gì và giờ làm việc thế nào?"
       "Dịch vụ gì + có KM không + giờ làm việc"
+      "Fixago làm gì, có KM không, giờ mở cửa?"
     """
     raw = (query or "").strip()
     if not raw:
@@ -615,39 +639,46 @@ def _split_questions(query: str) -> list[str]:
         if len(parts) >= 2:
             return parts
 
-    # 4. Split on plain ", " or ";" when each part has a distinct question/service signal
+    # 4. Split on plain ", " or ";" when each part has a distinct signal
+    # Hours keywords are valid signals too (not just service/price)
     _Q_SIGNALS = [
         "giá", "bao nhiêu", "gì", "sao", "thế nào", "ra sao", "như thế",
         "không", "có", "dịch vụ", "km", "khuyến mãi", "ưu đãi",
         "sửa", "lắp", "kiểm tra", "hỏng", "bị", "lỗi", "hư",
         "điện", "nước", "máy lạnh", "xây", "thạch cao",
-        "how much", "what", "when", "price", "service", "fix", "repair",
+        "giờ", "thời gian", "mấy giờ", "làm việc", "hoạt động", "open",
+        "how much", "what", "when", "price", "service", "fix", "repair", "hour",
     ]
     for sep in [",", ";"]:
         sep_parts = [p.strip() for p in raw.split(sep) if p.strip()]
         if len(sep_parts) >= 2 and len(sep_parts) <= 5:
-            # Require each part to have a recognizable signal
             if all(any(s in p.lower() for s in _Q_SIGNALS) for p in sep_parts):
                 return sep_parts
 
-    # 5. Split on " và " only when BOTH sides have distinct service/question signals
+    # 5. Split on " và " when sides are clearly different topics
+    # Hours + anything else always qualifies as two topics
     _SERVICE_SIGNALS = [
         "điện", "nước", "máy lạnh", "xây", "thạch cao", "sơn", "ống",
-        "electric", "water", "pipe", "air con",
+        "electric", "water", "pipe", "air con", "dịch vụ", "services",
+        "khuyến mãi", "promotion", "km",
     ]
     _QUESTION_SIGNALS = [
         "giá", "bao nhiêu", "thế nào", "ra sao", "có không", "dịch vụ",
         "how much", "what", "price",
     ]
     and_parts = re.split(r'\s+và\s+', raw, flags=re.IGNORECASE)
-    if len(and_parts) == 2:
-        a, b = and_parts[0].lower(), and_parts[1].lower()
-        a_has_service  = any(s in a for s in _SERVICE_SIGNALS)
-        b_has_service  = any(s in b for s in _SERVICE_SIGNALS)
-        a_has_question = any(s in a for s in _QUESTION_SIGNALS)
-        b_has_question = any(s in b for s in _QUESTION_SIGNALS)
-        # Split only if each part is clearly about different things
-        if (a_has_service and b_has_service) or (a_has_question and b_has_question):
+    if len(and_parts) >= 2:
+        parts_lower = [p.lower() for p in and_parts]
+        # Always split if one side is hours and the other has a topic signal
+        has_hours_side  = any(_is_hours_question(p) for p in parts_lower)
+        has_topic_side  = any(any(s in p for s in _SERVICE_SIGNALS + _QUESTION_SIGNALS)
+                              for p in parts_lower)
+        if has_hours_side and has_topic_side:
+            return [p.strip() for p in and_parts]
+        # Also split if both sides have distinct service/question signals
+        a, b = parts_lower[0], parts_lower[-1]
+        if ((any(s in a for s in _SERVICE_SIGNALS) and any(s in b for s in _SERVICE_SIGNALS))
+                or (any(s in a for s in _QUESTION_SIGNALS) and any(s in b for s in _QUESTION_SIGNALS))):
             return [p.strip() for p in and_parts]
 
     return [raw]
@@ -899,8 +930,30 @@ def _run_legacy_tool_path(query: str, history: list, messages: list, used_tools:
     if multi_result and multi_result != _hint_tool:
         return multi_result
 
-    # 4. Single tool — return result directly, no LLM (prevents hallucination)
+    # 4. Single tool detected — but check if query also asks about hours (combo case)
     if _hint_tool and _hint_tool.startswith("CALL_TOOL:"):
+        if _is_hours_question(query):
+            # Combo: tool data + hours fact → LLM stitch
+            tool_data = _fetch_tool_data_block(_hint_tool, used_tools)
+            combo_blocks = [b for b in [tool_data, _HOURS_FACT] if b]
+            if combo_blocks:
+                user_lang = _detect_user_language(query)
+                combo_context = "\n\n---\n".join(combo_blocks)
+                if user_lang == "en":
+                    enriched = (
+                        f"SYSTEM DATA:\n{combo_context}\n\n"
+                        f"Customer: {query}\n\n"
+                        f"Answer all parts naturally in 2-4 sentences using only the data above."
+                    )
+                else:
+                    enriched = (
+                        f"DỮ LIỆU HỆ THỐNG:\n{combo_context}\n\n"
+                        f"Khách hỏi: {query}\n\n"
+                        f"Trả lời tất cả các phần tự nhiên, ngắn gọn (2-4 câu), "
+                        f"chỉ dùng dữ liệu trên."
+                    )
+                llm_messages = messages[:-1] + [{"role": "user", "content": enriched}]
+                return llm_chat(llm_messages, temperature=0.1)
         return _execute_tool(_hint_tool, messages, used_tools)
 
     # 5. Multi-question: split, fetch each tool's data, inject all into ONE LLM call
@@ -909,6 +962,10 @@ def _run_legacy_tool_path(query: str, history: list, messages: list, used_tools:
         data_blocks: list[str] = []
 
         for sub_q in sub_questions:
+            # Hours sub-question → inject hardcoded fact, no API call needed
+            if _is_hours_question(sub_q):
+                data_blocks.append(_HOURS_FACT)
+                continue
             tool = _detect_tool_intent(sub_q)
             if tool and tool.startswith("CALL_TOOL:"):
                 block = _fetch_tool_data_block(tool, used_tools)
