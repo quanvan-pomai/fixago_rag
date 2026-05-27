@@ -41,12 +41,12 @@ CALL_TOOL: get_promotions()
 Nếu khách đã xác nhận đặt lịch và đã có đủ tên + số điện thoại + địa chỉ:
 CALL_TOOL: create_booking(name="<tên>", phone="<sđt>", address="<địa_chỉ>", description="<vấn_đề>")
 
-Từ khóa service nên ngắn:
-- chập điện, ổ cắm, bóng đèn, tủ điện, aptomat, dây điện => "điện"
-- rò nước, nghẹt ống, vòi sen, bồn cầu, máy bơm, lavabo => "nước"
-- máy lạnh, điều hòa, tủ lạnh, nạp gas, không lạnh => "điện lạnh"
-- sơn tường, chống thấm, ốp lát, ban công, cải tạo => "xây dựng"
-- trần, vách ngăn, thạch cao nứt => "thạch cao"
+Từ khóa service nên dùng tên nhóm dịch vụ chính (TUYỆT ĐỐI KHÔNG dùng từ khóa quá chi tiết):
+- Lỗi liên quan điện (ổ cắm, bóng đèn, chập điện, tủ điện, aptomat, dây điện...) => search="điện"
+- Lỗi liên quan nước (rò nước, nghẹt ống, vòi sen, bồn cầu, máy bơm, lavabo...) => search="nước"
+- Lỗi liên quan điện lạnh (máy lạnh, điều hòa, tủ lạnh, nạp gas, không lạnh...) => search="điện lạnh"
+- Lỗi liên quan xây dựng (sơn tường, chống thấm, ốp lát, ban công, cải tạo...) => search="xây dựng"
+- Lỗi liên quan thạch cao (trần, vách ngăn, thạch cao nứt...) => search="thạch cao"
 
 # 3. QUY TẮC QUAN TRỌNG VỀ TOOL
 
@@ -281,6 +281,10 @@ CALL_TOOL: get_services(search="nước")
 User: Máy lạnh không lạnh
 Assistant:
 CALL_TOOL: get_services(search="điện lạnh")
+
+User: Đặt thợ sửa ổ cắm cho mình
+Assistant:
+CALL_TOOL: get_services(search="điện")
 
 User: Có mã giảm giá không?
 Assistant:
