@@ -239,6 +239,80 @@ def format_services_for_llm(services: List[Dict], search_arg: str = "") -> str:
     return "\n".join(lines)
 
 
+def format_services_direct(services: List[Dict], search_arg: str = "", lang: str = "vi") -> str:
+    """
+    Build a complete, ready-to-send price answer — NO LLM needed.
+    Used when we have real price data and want a deterministic response.
+    """
+    if not services:
+        if lang == "en":
+            return (
+                f"We don't have detailed pricing for '{search_arg}' in the system yet. "
+                "A technician can visit and provide an exact quote before any work begins. "
+                "Would you like to book an appointment?"
+            )
+        return (
+            f"Dạ hiện mình chưa có bảng giá chi tiết cho '{search_arg}'. "
+            "Fixago có thể cử thợ đến kiểm tra và báo chi phí chính xác trước khi làm. "
+            "Bạn muốn đặt lịch không ạ?"
+        )
+
+    priced   = [s for s in services if int(float(s.get("unitPrice") or 0)) > 0]
+    unpriced = [s for s in services if int(float(s.get("unitPrice") or 0)) == 0]
+
+    if lang == "en":
+        parts = []
+        if priced:
+            prices = [int(float(s["unitPrice"])) for s in priced]
+            lo, hi = min(prices), max(prices)
+            range_str = _fmt(lo) if lo == hi else f"{_fmt(lo)} – {_fmt(hi)}"
+            parts.append(f"Typical price range for {search_arg}: {range_str}.")
+            for s in priced[:4]:
+                t = f", ~{s['estimatedTime']} min" if s.get("estimatedTime") else ""
+                parts.append(f"• {s['name']}: {_fmt(int(float(s['unitPrice'])))}{t}")
+        if unpriced:
+            names = ", ".join(s["name"] for s in unpriced[:2])
+            parts.append(f"On-site assessment needed for: {names}.")
+        parts.append("Exact cost confirmed by technician before work starts. Want to book?")
+        return "\n".join(parts)
+
+    # Vietnamese
+    parts = []
+    if priced:
+        # Sort by price to show most accessible services first
+        priced_sorted = sorted(priced, key=lambda s: int(float(s.get("unitPrice") or 0)))
+        prices = [int(float(s["unitPrice"])) for s in priced_sorted]
+
+        # Use IQR-trimmed range to avoid outlier skew (e.g. trạm sạc xe điện)
+        # Simple approach: exclude top outlier if it's 5x the median
+        import statistics
+        median_price = statistics.median(prices)
+        typical = [p for p in prices if p <= median_price * 5]
+        lo = min(typical) if typical else min(prices)
+        hi = max(typical) if typical else max(prices)
+
+        range_str = _fmt(lo) if lo == hi else f"{_fmt(lo)} – {_fmt(hi)}"
+        label = "Tổng quan giá" if search_arg == "all" else f"Giá sửa {search_arg}"
+        parts.append(f"Dạ {label} tham khảo: **{range_str}**.")
+
+        # Show 4 most affordable/common services
+        for s in priced_sorted[:4]:
+            t = f", ~{s['estimatedTime']} phút" if s.get("estimatedTime") else ""
+            parts.append(f"• {s['name']}: {_fmt(int(float(s['unitPrice'])))}{t}")
+
+        # Mention outlier separately if exists
+        outliers = [s for s in priced_sorted if int(float(s["unitPrice"])) > median_price * 5]
+        if outliers:
+            names = ", ".join(s["name"] for s in outliers[:2])
+            parts.append(f"Dịch vụ đặc biệt như {names}: báo giá theo thực tế.")
+
+    if unpriced:
+        names = ", ".join(s["name"] for s in unpriced[:2])
+        parts.append(f"Một số hạng mục như {names} cần thợ kiểm tra mới báo được giá.")
+    parts.append("Thợ sẽ xác nhận chi phí chính xác trước khi làm. Bạn muốn đặt lịch không ạ?")
+    return "\n".join(parts)
+
+
 def format_groups_for_llm(groups: List[Dict]) -> str:
     """Convert raw groups into a compact fact block."""
     if not groups:

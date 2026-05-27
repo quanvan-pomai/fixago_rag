@@ -748,27 +748,7 @@ def _detect_multi_service(query: str, first_tool: str, messages: list, used_tool
         return first_tool
 
     combined = "\n\n---\n".join(data_blocks)
-    user_lang = _detect_user_language(query)
-
-    if user_lang == "en":
-        enriched = (
-            f"SYSTEM DATA:\n{combined}\n\n"
-            f"Customer: {query}\n\n"
-            f"Answer both topics naturally in 3-4 sentences. "
-            f"Mention price ranges, say technician confirms exact cost on-site. "
-            f"Do NOT invent information."
-        )
-    else:
-        enriched = (
-            f"DỮ LIỆU HỆ THỐNG:\n{combined}\n\n"
-            f"Khách hỏi: {query}\n\n"
-            f"Trả lời cả hai hạng mục tự nhiên, ngắn gọn (3-4 câu). "
-            f"Nếu có giá: nêu khoảng tham khảo, thợ báo chính xác trước khi làm. "
-            f"KHÔNG bịa thêm thông tin."
-        )
-
-    llm_messages = messages[:-1] + [{"role": "user", "content": enriched}]
-    return llm_chat(llm_messages, temperature=0.1)
+    return _llm_with_injected_data(query, combined, messages)
 
 
 def _resolve_tool_data(sub_query: str, messages: list, used_tools: list) -> str:
@@ -810,19 +790,21 @@ def _fetch_tool_data_block(tool_str: str, used_tools: list) -> str:
 
 
 def _detect_user_language(text: str) -> str:
-    """Return 'en' if message is predominantly English, else 'vi'."""
-    en_words = re.findall(
-        r'\b(what|how|can|do|does|is|are|price|service|fix|repair|help|'
-        r'install|replace|cost|check|please|i|the|a|an|my|your|and|or|'
-        r'not|water|electric|air|cold|leak|broken|wall|ceiling)\b',
+    """
+    Return 'en' if message is clearly English, else 'vi'.
+    Only used for a few hardcoded static responses (hours, groups).
+    All LLM-generated responses let the model handle language from the system prompt.
+    """
+    # If any accented Vietnamese character exists → definitely Vietnamese
+    if re.search(r'[àáâãèéêìíòóôõùúýăđơưạảấầẩẫậắằẳẵặẹẻẽếềểễệỉịọỏốồổỗộớờởỡợụủứừửữựỳỷỹỵ]', text, re.IGNORECASE):
+        return "vi"
+    # Only call English when clearly so — multiple unambiguous English words
+    en_hits = re.findall(
+        r'\b(what|how|can|does|price|service|fix|repair|help|install|replace|cost|'
+        r'check|please|water|electric|working|hours|schedule|services|available|offer)\b',
         text.lower()
     )
-    vi_words = re.findall(
-        r'\b(sửa|giá|bao|nhiêu|máy|lạnh|điện|nước|đặt|lịch|không|có|'
-        r'bị|hỏng|ống|tường|thợ|hỗ|trợ|dịch|vụ|mình|bạn|dạ)\b',
-        text.lower()
-    )
-    return "en" if len(en_words) > len(vi_words) else "vi"
+    return "en" if len(set(en_hits)) >= 2 else "vi"
 
 
 def _is_price_question(query: str) -> bool:
@@ -844,73 +826,19 @@ def _llm_with_injected_data(
     query: str,
     data_block: str,
     messages: list,
-    user_lang: str = "vi",
 ) -> str:
     """
-    Inject backend data as a mandatory fact context, then let LLM answer naturally.
-    Prompt adapts based on whether query is a price question or symptom/general question.
+    Inject backend data as a mandatory fact context using the system prompt's
+    [DỮ LIỆU HỆ THỐNG] format, then let the LLM answer naturally.
+    The LLM handles language (Vietnamese/English/mixed) from the system prompt rule.
     """
-    is_price_q = _is_price_question(query)
-
-    if user_lang == "en":
-        if is_price_q:
-            instruction = (
-                f"SYSTEM DATA:\n{data_block}\n\n"
-                f"Customer: {query}\n\n"
-                f"Answer: Lead with the price range from the data above (e.g. 'Typically X–Y VND'). "
-                f"List 2-3 common services with their prices. "
-                f"End with: technician will confirm exact cost on-site. "
-                f"Do NOT say 'need to check' if prices are already in the data. "
-                f"Do NOT invent prices."
-            )
-        else:
-            instruction = (
-                f"SYSTEM DATA:\n{data_block}\n\n"
-                f"Customer: {query}\n\n"
-                f"Answer naturally in 2-3 sentences using ONLY the data above. "
-                f"If data has prices, mention the range. "
-                f"If data shows 'Báo giá thực tế', say it needs on-site assessment. "
-                f"End with invitation to book or ask more. Do NOT invent information."
-            )
-    else:
-        # Check if data_block actually contains prices to guide the prompt
-        has_price_data = any(c.isdigit() for c in data_block) and "VNĐ" in data_block
-
-        if is_price_q:
-            if has_price_data:
-                instruction = (
-                    f"DỮ LIỆU GIÁ TỪ HỆ THỐNG (đây là thông tin thật, dùng ngay):\n"
-                    f"{data_block}\n\n"
-                    f"Khách hỏi: {query}\n\n"
-                    f"QUAN TRỌNG: Dữ liệu trên ĐÃ CÓ GIÁ. Tuyệt đối KHÔNG nói 'chưa có thông tin' hay 'cần kiểm tra thực tế'.\n"
-                    f"Trả lời:\n"
-                    f"1. Câu đầu: nêu ngay khoảng giá tham khảo từ dữ liệu (vd: 'Giá tham khảo từ X đến Y VNĐ')\n"
-                    f"2. Liệt kê 2-3 dịch vụ phổ biến kèm giá cụ thể\n"
-                    f"3. Câu cuối: nhắc thợ báo chính xác trước khi làm + mời đặt lịch\n"
-                    f"Giọng: 'mình', 'bạn', 'dạ'. KHÔNG bịa thêm giá ngoài dữ liệu.\n"
-                )
-            else:
-                instruction = (
-                    f"DỮ LIỆU HỆ THỐNG:\n{data_block}\n\n"
-                    f"Khách hỏi: {query}\n\n"
-                    f"Dữ liệu chưa có giá cụ thể. Trả lời:\n"
-                    f"- Nói giá phụ thuộc tình trạng thực tế, thợ sẽ báo sau khi kiểm tra\n"
-                    f"- Mời đặt lịch để được tư vấn và báo giá tại nhà\n"
-                    f"- Ngắn gọn 2 câu, giọng 'mình', 'bạn', 'dạ'\n"
-                )
-        else:
-            instruction = (
-                f"DỮ LIỆU HỆ THỐNG (chỉ dùng thông tin này, không bịa thêm):\n"
-                f"{data_block}\n\n"
-                f"Khách hỏi: {query}\n\n"
-                f"Trả lời theo đúng quy tắc:\n"
-                f"- Ngắn gọn 2-3 câu, giọng thân thiện (dùng 'mình', 'bạn', 'dạ')\n"
-                f"- Nếu có giá trong dữ liệu: nêu khoảng giá tham khảo\n"
-                f"- Nếu dữ liệu ghi 'Báo giá thực tế': nói cần thợ đến kiểm tra\n"
-                f"- Kết thúc: mời đặt lịch hoặc hỏi thêm\n"
-                f"- KHÔNG bịa giá hay thông tin không có trong dữ liệu\n"
-            )
-
+    # Wrap data in the format the system prompt already teaches the model to use
+    instruction = (
+        f"[DỮ LIỆU HỆ THỐNG — chỉ dùng thông tin này để trả lời, không bịa thêm]\n"
+        f"{data_block}\n"
+        f"[/DỮ LIỆU]\n\n"
+        f"{query}"
+    )
     llm_messages = messages[:-1] + [{"role": "user", "content": instruction}]
     return llm_chat(llm_messages, temperature=0.1)
 
@@ -935,35 +863,50 @@ def _extract_clean_query(last_user_content: str) -> str:
 
 def _execute_tool(tool_str: str, messages: list, used_tools: list) -> str:
     """
-    Execute a CALL_TOOL string: fetch backend data, inject into LLM for natural response.
-    Falls back to pre-formatted handlers if data is empty or fetch fails.
+    Execute a CALL_TOOL string.
+
+    Routing strategy:
+      - get_groups      → fetch + inject into LLM (LLM handles language naturally)
+      - get_promotions  → deterministic formatter
+      - get_services    → fetch + inject data into LLM via _llm_with_injected_data()
+                          The system prompt + injected data guide the LLM to respond
+                          in the customer's language with the right tone.
     """
-    # Get clean query from last user message
+    # Extract clean query from last user message
     last_user = ""
     for msg in reversed(messages):
         if msg.get("role") == "user":
             last_user = msg.get("content", "")
             break
+    query = _extract_clean_query(last_user)
 
-    query     = _extract_clean_query(last_user)
-    user_lang = _detect_user_language(query)
+    # ── get_groups ────────────────────────────────────────────────────────────
+    if "get_groups" in tool_str:
+        used_tools.append("Tool [Backend API]: GET /services/groups")
+        groups = fetch_raw_groups()
+        if groups:
+            data_block = format_groups_for_llm(groups)
+            return _llm_with_injected_data(query, data_block, messages)
+        return handle_get_groups(messages, used_tools)
 
-    data_block = _fetch_tool_data_block(tool_str, used_tools)
+    # ── get_promotions ────────────────────────────────────────────────────────
+    if "get_promotions" in tool_str:
+        return handle_get_promotions(messages, used_tools)
 
-    # If data fetch returned empty/failed, fall back to pre-formatted handlers
-    if not data_block or "không tìm thấy" in data_block.lower():
-        if "get_groups" in tool_str:
-            return handle_get_groups(messages, used_tools)
-        if "get_promotions" in tool_str:
-            return handle_get_promotions(messages, used_tools)
-        if "get_services" in tool_str:
-            m2 = re.search(r'search="([^"]*)"', tool_str)
-            search = normalize_service_search(m2.group(1) if m2 else "")
-            return handle_get_services(search, messages, used_tools)
-        return ""
+    # ── get_services ──────────────────────────────────────────────────────────
+    if "get_services" in tool_str:
+        m2 = re.search(r'search="([^"]*)"', tool_str)
+        search = normalize_service_search(m2.group(1) if m2 else "")
+        used_tools.append(f'Tool [Backend API]: GET /services?search="{search}"')
+        services = fetch_raw_services(search)
 
-    # Let LLM answer naturally with injected data + conversation history context
-    return _llm_with_injected_data(query, data_block, messages, user_lang)
+        if services:
+            data_block = format_services_for_llm(services, search)
+            return _llm_with_injected_data(query, data_block, messages)
+
+        return handle_get_services(search, messages, used_tools)
+
+    return ""
 
 
 def _run_legacy_tool_path(query: str, history: list, messages: list, used_tools: list) -> str:
@@ -1002,65 +945,42 @@ def _run_legacy_tool_path(query: str, history: list, messages: list, used_tools:
     # 4. Single tool detected — but check if query also asks about hours (combo case)
     if _hint_tool and _hint_tool.startswith("CALL_TOOL:"):
         if _is_hours_question(query):
-            # Combo: tool data + hours fact → LLM stitch
+            # Combo: tool data + hours fact → one LLM call with all data
             tool_data = _fetch_tool_data_block(_hint_tool, used_tools)
             combo_blocks = [b for b in [tool_data, _HOURS_FACT] if b]
             if combo_blocks:
-                user_lang = _detect_user_language(query)
-                combo_context = "\n\n---\n".join(combo_blocks)
-                if user_lang == "en":
-                    enriched = (
-                        f"SYSTEM DATA:\n{combo_context}\n\n"
-                        f"Customer: {query}\n\n"
-                        f"Answer all parts naturally in 2-4 sentences using only the data above."
-                    )
-                else:
-                    enriched = (
-                        f"DỮ LIỆU HỆ THỐNG:\n{combo_context}\n\n"
-                        f"Khách hỏi: {query}\n\n"
-                        f"Trả lời tất cả các phần tự nhiên, ngắn gọn (2-4 câu), "
-                        f"chỉ dùng dữ liệu trên."
-                    )
-                llm_messages = messages[:-1] + [{"role": "user", "content": enriched}]
-                return llm_chat(llm_messages, temperature=0.1)
+                combined = "\n\n---\n".join(combo_blocks)
+                return _llm_with_injected_data(query, combined, messages)
         return _execute_tool(_hint_tool, messages, used_tools)
 
-    # 5. Multi-question: split, fetch each tool's data, inject all into ONE LLM call
+    # 5. Multi-question: split, handle each part, collect all data blocks
     sub_questions = _split_questions(query)
     if len(sub_questions) > 1:
-        data_blocks: list[str] = []
+        data_blocks: list[str] = []   # all data to inject into one LLM call
+        hours_fact  = False
 
         for sub_q in sub_questions:
-            # Hours sub-question → inject hardcoded fact, no API call needed
             if _is_hours_question(sub_q):
-                data_blocks.append(_HOURS_FACT)
+                hours_fact = True
                 continue
             tool = _detect_tool_intent(sub_q)
-            if tool and tool.startswith("CALL_TOOL:"):
-                block = _fetch_tool_data_block(tool, used_tools)
-                if block:
-                    data_blocks.append(block)
+            if not tool:
+                continue
+            block = _fetch_tool_data_block(tool, used_tools)
+            if block:
+                data_blocks.append(block)
+
+        if hours_fact:
+            data_blocks.append(_HOURS_FACT)
 
         if data_blocks:
-            tool_context = "\n\n---\n".join(data_blocks)
-            user_lang = _detect_user_language(query)
-            if user_lang == "en":
-                enriched = (
-                    f"SYSTEM DATA (use only this, do not invent):\n{tool_context}\n\n"
-                    f"Customer question: {query}\n\n"
-                    f"Answer each part of the question naturally using the data above. "
-                    f"2-4 sentences total. Mention price ranges if present, say technician "
-                    f"confirms exact cost on-site. Do NOT invent information."
-                )
-            else:
-                enriched = (
-                    f"DỮ LIỆU HỆ THỐNG (chỉ dùng thông tin này, không bịa thêm):\n"
-                    f"{tool_context}\n\n"
-                    f"Khách hỏi: {query}\n\n"
-                    f"Trả lời từng phần tự nhiên, ngắn gọn (2-4 câu tổng). "
-                    f"Nếu có giá: nêu khoảng tham khảo, nói thợ báo chính xác trước khi làm. "
-                    f"KHÔNG bịa thêm thông tin ngoài dữ liệu trên."
-                )
+            combined = "\n\n---\n".join(data_blocks)
+            enriched = (
+                f"[DỮ LIỆU HỆ THỐNG — chỉ dùng thông tin này để trả lời, không bịa thêm]\n"
+                f"{combined}\n"
+                f"[/DỮ LIỆU]\n\n"
+                f"{query}"
+            )
             llm_messages = messages[:-1] + [{"role": "user", "content": enriched}]
             return llm_chat(llm_messages, temperature=0.1)
 
