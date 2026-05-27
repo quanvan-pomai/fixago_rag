@@ -223,10 +223,13 @@ def _detect_tool_intent(query: str):
     ]):
         return "CALL_TOOL: get_groups()"
 
-    # VI service-list queries
+    # VI service-list queries (accented + no-accent)
     if any(k in q for k in [
         "dịch vụ gì", "có dịch vụ", "những dịch vụ", "nhóm dịch vụ",
         "fixago làm gì", "bên bạn làm gì", "có sửa gì", "provide",
+        # no-accent fallbacks (raw_q not normalized here, but _normalize_noaccent maps some)
+        "dich vu gi", "dich vu", "co dich vu", "nhung dich vu", "nhom dich vu",
+        "fixago lam gi", "co sua gi",
     ]):
         return "CALL_TOOL: get_groups()"
 
@@ -599,28 +602,37 @@ def _run_legacy_tool_path(query: str, history: list, messages: list, used_tools:
     if multi_result and multi_result != _hint_tool:
         return multi_result
 
-    # 4 & 5. Split questions, fetch each tool's data, inject all into LLM
+    # 4. Single tool — return result directly, no LLM (prevents hallucination)
+    if _hint_tool and _hint_tool.startswith("CALL_TOOL:"):
+        return _execute_tool(_hint_tool, messages, used_tools)
+
+    # 5. Multi-question: split, fetch each tool's data, inject all into ONE LLM call
     sub_questions = _split_questions(query)
-    tool_blocks: list[str] = []
+    if len(sub_questions) > 1:
+        tool_blocks: list[str] = []
+        pure_llm_parts: list[str] = []
 
-    for sub_q in sub_questions:
-        tool = _detect_tool_intent(sub_q)
-        if tool and tool.startswith("CALL_TOOL:"):
-            data = _execute_tool(tool, messages, used_tools)
-            if data:
-                tool_blocks.append(data)
+        for sub_q in sub_questions:
+            tool = _detect_tool_intent(sub_q)
+            if tool and tool.startswith("CALL_TOOL:"):
+                data = _execute_tool(tool, messages, used_tools)
+                if data:
+                    tool_blocks.append(data)
+            else:
+                pure_llm_parts.append(sub_q)
 
-    if tool_blocks:
-        # Inject all fetched data so the model answers every part naturally
-        tool_context = "\n\n---\n".join(tool_blocks)
-        enriched = (
-            f"{query}\n\n"
-            f"[Dữ liệu hệ thống:]\n{tool_context}"
-        )
-        llm_messages = messages[:-1] + [{"role": "user", "content": enriched}]
-        return llm_chat(llm_messages, temperature=0.2)
+        if tool_blocks:
+            tool_context = "\n\n---\n".join(tool_blocks)
+            enriched = (
+                f"{query}\n\n"
+                f"[Dữ liệu hệ thống để trả lời:]\n{tool_context}\n\n"
+                f"Hãy trả lời tất cả các phần của câu hỏi trên dựa vào dữ liệu này. "
+                f"Ngắn gọn, tự nhiên, đúng thông tin."
+            )
+            llm_messages = messages[:-1] + [{"role": "user", "content": enriched}]
+            return llm_chat(llm_messages, temperature=0.2)
 
-    # 6. Pure LLM (conversational, comparison, identity, etc.)
+    # 6. Pure LLM — conversational (comparison, intro, quality, off-topic within scope)
     return llm_chat(messages, temperature=0.2)
 
 
