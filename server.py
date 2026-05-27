@@ -1019,12 +1019,10 @@ def _llm_with_injected_data(
         f"[DỮ LIỆU HỆ THỐNG — chỉ dùng thông tin này để trả lời, không bịa thêm]\n"
         f"{data_block}\n"
         f"[/DỮ LIỆU]\n\n"
-        f"Trả lời ngắn gọn, thân thiện, dùng 'mình'/'bạn'/'dạ'. "
-        f"Dùng đúng ngôn ngữ của khách. Không bịa thêm ngoài dữ liệu.\n\n"
         f"{query}"
     )
     llm_messages = messages[:-1] + [{"role": "user", "content": instruction}]
-    raw = llm_chat(llm_messages, temperature=0.3)
+    raw = llm_chat(llm_messages, temperature=0.1)
     fix = _validate_llm_output(raw, data_block, query)
     return fix if fix is not None else raw
 
@@ -1171,15 +1169,7 @@ def _run_legacy_tool_path(query: str, history: list, messages: list, used_tools:
             return llm_chat(llm_messages, temperature=0.1)
 
     # 6. Pure LLM — conversational (comparison, intro, quality, off-topic within scope)
-    # Add a light tone anchor to the last user message so 3B doesn't drift to
-    # wrong language or robotic tone on short/no-accent queries
-    _tone_hint = "Trả lời ngắn gọn, thân thiện, đúng ngôn ngữ của khách, dùng 'mình'/'bạn'/'dạ'.\n\n"
-    _last = messages[-1]
-    _anchored_messages = messages[:-1] + [{
-        "role": _last["role"],
-        "content": _tone_hint + _last.get("content", ""),
-    }]
-    raw = llm_chat(_anchored_messages, temperature=0.3)
+    raw = llm_chat(messages, temperature=0.2)
     fix = _validate_llm_output(raw, None, query)
     return fix if fix is not None else raw
 
