@@ -21,7 +21,7 @@ logger = logging.getLogger("fixago.llm_client")
 LLM_URL = os.environ.get("LLM_URL", "http://127.0.0.1:8080/v1/chat/completions")
 
 
-LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "45"))
+LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))
 
 
 def llm_chat(
