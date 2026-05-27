@@ -178,6 +178,10 @@ _NOACCENT_MAP = {
     "thach cao": "thạch cao", "xay dung": "xây dựng", "cong tac": "công tắc",
     "bong den": "bóng đèn", "may bom": "máy bơm", "bon cau": "bồn cầu",
     "sua": "sửa", "bao nhieu": "bao nhiêu", "gia": "giá",
+    "ban co the": "bạn có thể", "ban ho tro": "bạn hỗ trợ",
+    "cong ty ban": "công ty bạn", "ho tro": "hỗ trợ",
+    "toi": "tôi", "nhung gi": "những gì", "giup": "giúp",
+    "la ai": "là ai", "lam gi": "làm gì",
 }
 
 def _normalize_noaccent(text: str) -> str:
@@ -275,7 +279,7 @@ def _static_fallback(query: str) -> str:
     return a canned response to avoid LLM latency.
     Returns empty string if no static answer fits.
     """
-    q = (query or "").lower()
+    q = _normalize_noaccent((query or "").lower())
 
     # Don't fire any static if the message is pure contact data being provided
     # (name + phone or address = user is mid-booking, not asking a question)
@@ -393,7 +397,12 @@ def _static_fallback(query: str) -> str:
         )
 
     # Identity
-    if any(k in q for k in ["bạn là ai", "who are you", "bạn là gì", "tên bạn là gì"]):
+    if any(k in q for k in [
+        "bạn là ai", "who are you", "bạn là gì", "tên bạn là gì",
+        "bạn có thể hỗ trợ", "bạn hỗ trợ", "hỗ trợ tôi những gì",
+        "bạn giúp được gì", "bạn có thể giúp", "công ty bạn làm gì",
+        "how can you help", "how you can help", "what can you help",
+    ]):
         return (
             "Dạ mình là Trợ lý AI của Fixago — nền tảng đặt thợ sửa chữa điện, nước, "
             "điện lạnh, xây dựng và thạch cao tại nhà. Bạn cần hỗ trợ gì không ạ?"
@@ -608,7 +617,6 @@ def _run_legacy_tool_path(query: str, history: list, messages: list, used_tools:
     _has_service_tool = forced_tool and "get_services" in str(forced_tool)
     if not detect_negation(query) and not _has_service_tool:
         booking_resp = build_booking_response(query, history)
-        import sys; print(f"[DEBUG] query={query!r} booking_resp={repr(booking_resp)[:100]} history_len={len(history)}", file=sys.stderr)
     else:
         booking_resp = None
 
