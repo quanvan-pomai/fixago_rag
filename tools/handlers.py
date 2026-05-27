@@ -59,6 +59,96 @@ def _build_price_summary(services: List[Dict]) -> str:
     return "\n".join(lines)
 
 
+# ── Raw data fetchers (return dict/list, no formatting) ───────────────────────
+
+def fetch_raw_groups() -> List[Dict]:
+    """Return raw group list from backend, or [] on error."""
+    try:
+        resp = requests.get(f"{BACKEND_URL}/services/groups", timeout=3)
+        if resp.status_code == 200:
+            return resp.json() or []
+    except Exception as exc:
+        logger.warning("fetch_raw_groups error: %s", exc)
+    return []
+
+
+def fetch_raw_services(search_arg: str) -> List[Dict]:
+    """Return raw service list for search_arg, or [] on error."""
+    try:
+        resp = requests.get(
+            f"{BACKEND_URL}/services",
+            params={"search": search_arg, "limit": 10},
+            timeout=3,
+        )
+        if resp.status_code == 200:
+            services = resp.json().get("data", [])
+            # Fallback for appliance types that share the "điện" group
+            if not services and search_arg in {"máy lạnh", "điện lạnh", "máy giặt"}:
+                fb = requests.get(f"{BACKEND_URL}/services", params={"search": "điện", "limit": 10}, timeout=3)
+                if fb.status_code == 200:
+                    services = fb.json().get("data", [])
+            return services
+    except Exception as exc:
+        logger.warning("fetch_raw_services error: %s", exc)
+    return []
+
+
+def fetch_raw_promotions() -> List[Dict]:
+    """Return raw promotion list from backend, or [] on error."""
+    try:
+        resp = requests.get(f"{BACKEND_URL}/discounts/available", timeout=3)
+        if resp.status_code == 200:
+            raw = resp.json()
+            return raw if isinstance(raw, list) else raw.get("data", [])
+    except Exception as exc:
+        logger.warning("fetch_raw_promotions error: %s", exc)
+    return []
+
+
+def format_services_for_llm(services: List[Dict], search_arg: str = "") -> str:
+    """Convert raw service list into a compact, LLM-readable fact block."""
+    if not services:
+        return f"Không tìm thấy dịch vụ khớp với '{search_arg}' trong hệ thống."
+    lines = [f"Danh sách dịch vụ hệ thống ({search_arg}):"]
+    for s in services[:8]:
+        price = int(float(s.get("unitPrice") or 0))
+        name  = s.get("name", "Dịch vụ")
+        time_ = s.get("estimatedTime") or 0
+        price_str = f"{price:,}".replace(",", ".") + " VNĐ" if price > 0 else "Báo giá thực tế"
+        time_str  = f", ~{time_} phút" if time_ else ""
+        lines.append(f"- {name}: {price_str}{time_str}")
+    return "\n".join(lines)
+
+
+def format_groups_for_llm(groups: List[Dict]) -> str:
+    """Convert raw groups into a compact fact block."""
+    if not groups:
+        return "Nhóm dịch vụ: Điện, Nước, Điện lạnh, Xây dựng, Thạch cao (dữ liệu mặc định)."
+    names = [g.get("name", "") for g in groups if g.get("name")]
+    return "Nhóm dịch vụ Fixago: " + ", ".join(names) + "."
+
+
+def format_promotions_for_llm(promos: List[Dict]) -> str:
+    """Convert raw promotions into a compact fact block."""
+    if not promos:
+        return "Hiện không có khuyến mãi."
+    lines = ["Khuyến mãi hiện có:"]
+    for p in promos:
+        line = f"- {p.get('name', 'Ưu đãi')}"
+        if p.get("code"):
+            line += f" (mã: {p['code']})"
+        if p.get("discountType") == 1:
+            line += f": giảm {p.get('discountValue', 0)}%"
+            if p.get("maxDiscountAmount"):
+                v = int(float(p["maxDiscountAmount"]))
+                line += f", tối đa {v:,}".replace(",", ".") + " VNĐ"
+        else:
+            v = int(float(p.get("discountValue", 0)))
+            line += f": giảm {v:,}".replace(",", ".") + " VNĐ"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 # ── Tool handlers ─────────────────────────────────────────────────────────────
 
 def handle_get_groups(messages: List[Dict], used_tools: List[str]) -> str:

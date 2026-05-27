@@ -40,7 +40,11 @@ from llm_client.client import (
     llm_summarize,
     load_grammar,
 )
-from tools.handlers import handle_get_groups, handle_get_promotions, handle_get_services
+from tools.handlers import (
+    handle_get_groups, handle_get_promotions, handle_get_services,
+    fetch_raw_groups, fetch_raw_services, fetch_raw_promotions,
+    format_groups_for_llm, format_services_for_llm, format_promotions_for_llm,
+)
 
 load_dotenv()
 
@@ -200,72 +204,198 @@ _BOOKING_TRIGGER_WORDS = [
 ]
 
 def _detect_tool_intent(query: str):
-    # Normalize no-accent input before matching
-    q = _normalize_noaccent((query or "").strip().lower())
+    """
+    Detect which backend tool to call for a given query.
+    Stronger pattern matching: covers symptom descriptions, no-accent,
+    mixed Viet-English, and context-aware intent (not just price keywords).
+    """
+    raw = (query or "").strip()
+    q   = _normalize_noaccent(raw.lower())
 
-    # If explicit booking trigger, don't dispatch as price tool
-    # (build_booking_response will handle it)
+    # If pure booking trigger (no price/service sub-question), let booking handler take it
     is_booking_trigger = any(k in q for k in _BOOKING_TRIGGER_WORDS)
-    if is_booking_trigger and not any(k in q for k in ["giá", "bao nhiêu", "how much", "price", "cost"]):
+    if is_booking_trigger and not any(k in q for k in [
+        "giá", "bao nhiêu", "how much", "price", "cost", "chi phí", "phí",
+    ]):
         return None
 
-    # Promotion — highest priority, check before service
+    # ── Promotion ────────────────────────────────────────────────────────────
     if any(k in q for k in [
         "khuyến mãi", "giảm giá", "ưu đãi", "voucher", "mã giảm", "coupon",
-        "discount", "promotion", "mã khuyến", "giảm %", "mã giảm",
+        "discount", "promotion", "mã khuyến", "giảm %",
+        "khuyen mai", "giam gia", "uu dai",
     ]):
         return "CALL_TOOL: get_promotions()"
 
-    # EN service-list queries
-    if any(k in q for k in [
-        "what service", "what can you", "what do you", "what does fixago",
-        "services do you", "services does fixago", "services available",
-    ]):
-        return "CALL_TOOL: get_groups()"
-
-    # VI service-list queries (accented + no-accent)
-    if any(k in q for k in [
+    # ── Service groups (what does Fixago offer) ───────────────────────────────
+    _GROUP_PATTERNS = [
+        # VI accented
         "dịch vụ gì", "có dịch vụ", "những dịch vụ", "nhóm dịch vụ",
-        "fixago làm gì", "bên bạn làm gì", "có sửa gì", "provide",
-        # no-accent fallbacks (raw_q not normalized here, but _normalize_noaccent maps some)
-        "dich vu gi", "dich vu", "co dich vu", "nhung dich vu", "nhom dich vu",
-        "fixago lam gi", "co sua gi",
-    ]):
+        "fixago làm gì", "bên bạn làm gì", "có sửa gì", "hỗ trợ gì",
+        "cung cấp gì", "bao gồm gì", "loại dịch vụ", "hạng mục gì",
+        "cung cấp những", "sửa được gì", "làm được gì", "hỗ trợ những gì",
+        # VI no-accent (raw, before normalize)
+        "dich vu gi", "co dich vu", "nhung dich vu", "nhom dich vu",
+        "fixago lam gi", "co sua gi", "ho tro gi", "cung cap gi",
+        "hang muc gi", "lam duoc gi", "sua duoc gi",
+        # EN
+        "what service", "what can you", "what do you offer", "what does fixago",
+        "services do you", "services available", "what kind of", "what types",
+        "what repairs", "do you fix", "can you fix", "what do you fix",
+        "what can fixago",
+    ]
+    if any(k in q for k in _GROUP_PATTERNS):
         return "CALL_TOOL: get_groups()"
 
-    service_map = {
-        "điện":      ["điện", "chập", "ổ cắm", "bóng đèn", "công tắc", "tủ điện",
-                      "aptomat", "cb", "dây điện", "electrical", "electric", "wire",
-                      "circuit", "breaker", "trạm sạc", "năng lượng mặt trời"],
-        "nước":      ["nước", "ống", "rò", "nghẹt", "vòi", "bồn cầu", "máy bơm",
-                      "van", "lavabo", "thoát nước", "pipe", "plumb", "leak", "water",
-                      "drain", "clog", "sewage"],
-        "máy lạnh":  ["máy lạnh", "điều hòa", "tủ lạnh", "nạp gas", "gas lạnh",
-                      "không lạnh", "điện lạnh", "máy giặt", "refrigerat",
-                      "air conditioner", "air con", "aircon", "ac unit", "washing machine",
-                      "washer", "dryer", "freezer"],
-        "xây dựng":  ["sơn", "chống thấm", "ốp lát", "gạch", "tường", "ban công",
-                      "xây dựng", "cải tạo", "thấm", "dột", "renovation", "paint",
-                      "waterproof", "tile", "cement"],
-        "thạch cao": ["thạch cao", "trần thạch cao", "vách ngăn", "plasterboard",
-                      "gypsum", "drywall", "ceiling board"],
-    }
-    intent_words = [
-        "giá", "bao nhiêu", "sửa", "lắp", "thay", "bảo dưỡng", "vệ sinh",
-        "kiểm tra", "báo giá", "hỏng", "lỗi", "dịch vụ", "tư vấn",
-        "how much", "repair", "fix", "install", "replace", "cost", "price",
-        "service", "maintenance", "check",
-        "làm gì", "phải làm", "xử lý", "khắc phục", "nguy hiểm không",
-        "cần làm", "nên làm", "bị", "không lên", "không hoạt động",
-        "không mát", "không lạnh", "rò", "rỉ", "nghẹt", "tắc", "vỡ",
+    # ── Service-specific detection ────────────────────────────────────────────
+    # IMPORTANT: order matters — more specific patterns checked first.
+    # "máy lạnh nhỏ giọt nước" must match máy lạnh, not nước.
+    # "tường bị thấm nước" must match xây dựng, not nước.
+    # Strategy: check equipment/appliance context first, THEN generic water/electric keywords.
+
+    # Priority map: check these first before generic keywords
+    # Priority patterns: resolve ambiguous cases before generic keyword matching.
+    # Uses regex to handle "tường bị thấm", "tường nhà bị thấm" etc.
+    _PRIORITY_CHECKS = [
+        # máy lạnh wins over generic "nước" keyword
+        ("máy lạnh", None, [
+            "máy lạnh", "điều hòa", "điều hoà", "tủ lạnh", "tủ đông",
+            "air conditioner", "aircon", "air con", "ac unit",
+            "refrigerator", "fridge", "freezer",
+        ]),
+        # xây dựng structural water wins over generic "nước"
+        ("xây dựng", [
+            r'tường.{0,10}thấm', r'nhà.{0,10}thấm', r'mái.{0,10}dột',
+            r'tường.{0,10}nứt', r'nứt.{0,10}tường',
+        ], [
+            "thấm dột", "dột nhà", "nhà bị dột",
+            "bong sơn", "sơn bị bong", "ẩm mốc",
+            "chống dột", "chống thấm", "xử lý thấm",
+        ]),
+        # Plumbing pump/pipe specific
+        ("nước", None, [
+            "bơm nước", "máy bơm", "bơm không lên",
+            "ống nước bị", "vòi nước bị", "bồn cầu bị",
+        ]),
     ]
 
-    if any(w in q for w in intent_words):
+    for svc_key, regex_pats, literal_pats in _PRIORITY_CHECKS:
+        if literal_pats and any(p in q for p in literal_pats):
+            return f'CALL_TOOL: get_services(search="{svc_key}")'
+        if regex_pats and any(re.search(p, q) for p in regex_pats):
+            return f'CALL_TOOL: get_services(search="{svc_key}")'
+
+    # Full service map (checked after priority patterns)
+    service_map = {
+        "điện": [
+            "điện", "ổ cắm", "bóng đèn", "công tắc", "tủ điện", "aptomat",
+            "dây điện", "bảng điện", "trạm sạc", "năng lượng mặt trời", "solar",
+            "đèn điện", "quạt điện",
+            "chập điện", "cháy điện", "tóe lửa", "hở điện",
+            "mất điện", "điện yếu", "nhảy cầu dao", "giật điện", "cúp điện",
+            "electrical", "electric", "wire", "circuit", "breaker",
+            "socket", "outlet", "switch", "fuse", "wiring",
+        ],
+        "nước": [
+            "nước",  # standalone — catches "nước chảy yếu", "nước bị rò"...
+            "ống nước", "ống thoát", "vòi nước", "bồn cầu", "lavabo",
+            "bồn tắm", "máy bơm", "van nước", "đường ống", "bể nước",
+            "rò rỉ", "rò nước", "nghẹt ống", "tắc ống", "tắc bồn cầu",
+            "vỡ ống", "bể ống", "ngập nước", "thoát chậm", "không thoát",
+            "nước không chảy", "nước yếu", "bơm không lên",
+            "pipe", "plumb", "leak", "drain", "clog", "sewage",
+            "toilet", "faucet", "tap", "shower", "sink", "pump",
+        ],
+        "máy lạnh": [
+            "máy lạnh", "điều hòa", "điều hoà", "tủ lạnh", "tủ đông",
+            "điện lạnh", "máy giặt",
+            "nạp gas", "bơm gas", "hết gas", "không lạnh", "không mát",
+            "mát yếu", "lạnh yếu", "vệ sinh máy lạnh", "bảo dưỡng máy lạnh",
+            "máy giặt không quay", "máy giặt kêu",
+            "air conditioner", "aircon", "air con", "ac ",
+            "refrigerator", "fridge", "freezer", "washing machine",
+            "washer", "dryer",
+            # EN symptom
+            "not cold", "not cooling", "ac not", "aircon not",
+        ],
+        "xây dựng": [
+            "sơn nhà", "sơn lại", "sơn tường", "sơn trần",
+            "chống thấm", "ốp lát", "gạch men", "gạch nền",
+            "tường", "ban công", "xây dựng", "cải tạo nhà",
+            "trát vữa", "bê tông", "nền nhà",
+            "paint", "waterproof", "tile", "cement",
+            "renovation", "remodel", "construction", "wall", "crack",
+        ],
+        "thạch cao": [
+            "thạch cao", "trần thạch cao", "vách ngăn", "trần nhà",
+            "vách thạch cao", "làm trần",
+            "plasterboard", "gypsum", "drywall", "ceiling board",
+            "false ceiling", "partition", "ceiling",
+        ],
+    }
+
+    # No-accent service name fallbacks (check against raw un-normalized query)
+    _NOACCENT_SERVICE = {
+        "dien":        "điện",
+        "nuoc":        "nước",
+        "may lanh":    "máy lạnh",
+        "may giat":    "máy lạnh",
+        "xay dung":    "xây dựng",
+        "thach cao":   "thạch cao",
+        "son tuong":   "xây dựng",
+        "chong tham":  "xây dựng",
+        "ong nuoc":    "nước",
+        "bon cau":     "nước",
+    }
+    raw_lower = raw.lower()
+    for noaccent_key, svc in _NOACCENT_SERVICE.items():
+        if noaccent_key in raw_lower:
+            return f'CALL_TOOL: get_services(search="{svc}")'
+
+    # Group list — no-accent patterns not caught by normalize
+    _GROUP_NOACCENT = ["co sua gi", "lam gi", "ho tro gi", "dich vu gi", "cung cap gi",
+                       "hang muc gi", "co the sua gi", "sua duoc gi"]
+    if any(k in raw_lower for k in _GROUP_NOACCENT):
+        return "CALL_TOOL: get_groups()"
+
+    # Intent signals: any symptom description, question, or repair verb counts
+    _INTENT_SIGNALS = [
+        "giá", "bao nhiêu", "chi phí", "phí", "báo giá",
+        "how much", "price", "cost", "fee",
+        "sửa", "lắp", "thay", "bảo dưỡng", "vệ sinh", "kiểm tra",
+        "khắc phục", "xử lý", "làm lại", "cần sửa",
+        "repair", "fix", "install", "replace", "service", "clean", "check",
+        "bị", "hỏng", "lỗi", "hư", "không", "tắc", "vỡ", "rò",
+        "thấm", "dột", "kêu", "nhảy", "hay bị", "thường bị", "đang bị",
+        "yếu quá", "yếu lắm", "quá yếu", "chảy yếu", "lạnh yếu",
+        "chậm quá", "quá chậm", "không đủ", "không ổn",
+        "tư vấn", "nên làm", "phải làm", "cần làm", "làm thế nào",
+        "nguy hiểm không", "có sao không",
+        "broken", "not working", "damaged", "leaking", "clogged", "weak",
+    ]
+
+    has_intent = any(s in q for s in _INTENT_SIGNALS)
+
+    # Symptom-context patterns: service keyword + descriptive word = intent
+    _SYMPTOM_CONTEXT = [
+        r'(máy lạnh|điều hòa|tủ lạnh)\s+\S',
+        r'(ống nước|bồn cầu|vòi nước|lavabo)\s+\S',
+        r'(điện|đèn|ổ cắm)\s+(bị|hay|không|yếu)',
+        r'(tường|mái|trần)\s+(bị|thấm|dột|nứt)',
+        r'(air con|aircon|ac)\s+(not|broken|leak)',
+    ]
+    if not has_intent:
+        for pat in _SYMPTOM_CONTEXT:
+            if re.search(pat, q):
+                has_intent = True
+                break
+
+    if has_intent:
         for key, kws in service_map.items():
             if any(kw in q for kw in kws):
                 return f'CALL_TOOL: get_services(search="{key}")'
 
-    # Short single-service reply (e.g. "Điện", "Nước", "Máy lạnh") — user clarifying service type
+    # Short single-service clarification (e.g. "Điện", "Nước", "Máy lạnh")
     if len(q.split()) <= 3:
         for key, kws in service_map.items():
             if any(kw == q.strip() or q.strip().startswith(kw) for kw in kws):
@@ -455,61 +585,97 @@ def _split_questions(query: str) -> list[str]:
     Split a multi-question message into individual sub-questions.
     Returns [query] unchanged if no split is needed.
 
-    Handles patterns like:
+    Handles common Vietnamese/English patterns:
       "Giá điện bao nhiêu? Còn nước thì sao? Có KM không?"
       "Fixago làm gì, giá ra sao, có KM không"
-      "Sửa máy lạnh bao nhiêu và thời gian làm việc thế nào"
+      "Sửa máy lạnh bao nhiêu và giá nước thế nào"
+      "Máy lạnh nhà mình hỏng, còn ống nước thì nghẹt nữa"
+      "Dịch vụ gì + có KM không + giờ làm việc"
     """
-    import re as _re
     raw = (query or "").strip()
+    if not raw:
+        return [raw]
 
-    # Split on sentence-ending punctuation followed by a capital/word
-    parts = _re.split(r'(?<=[?!])\s+(?=[A-ZÀ-Ỹa-zà-ỹ])', raw)
-    if len(parts) >= 2:
-        return [p.strip() for p in parts if p.strip()]
+    # 1. Split on ? or ! followed by next sentence
+    parts = re.split(r'(?<=[?!])\s+(?=[A-ZÀ-Ỹa-zà-ỹ0-9])', raw)
+    if len(parts) >= 2 and all(p.strip() for p in parts):
+        return [p.strip() for p in parts]
 
-    # Split on ", còn ", "; ", comma between distinct question fragments
-    parts = _re.split(
-        r',\s*(?:còn|ngoài ra|thêm nữa|đồng thời)\s+|;\s+',
-        raw, flags=_re.IGNORECASE
+    # 2. Split on explicit transition words: "còn X thì", "ngoài ra", "thêm nữa"
+    parts = re.split(
+        r'[,;]\s*(?:còn|ngoài ra|thêm nữa|bên cạnh đó|đồng thời)\s+',
+        raw, flags=re.IGNORECASE
     )
-    if len(parts) >= 2:
-        return [p.strip() for p in parts if p.strip()]
+    if len(parts) >= 2 and all(p.strip() for p in parts):
+        return [p.strip() for p in parts]
 
-    # Split on plain commas when each segment has its own question signal
-    _Q_SIGNALS2 = ["giá", "bao nhiêu", "gì", "sao", "thế nào", "ra sao",
-                   "không", "có", "làm gì", "dịch vụ", "km", "khuyến mãi"]
-    comma_parts = [p.strip() for p in raw.split(",") if p.strip()]
-    if len(comma_parts) >= 2 and all(
-        any(s in p.lower() for s in _Q_SIGNALS2) for p in comma_parts
-    ):
-        return comma_parts
+    # 3. Split on " + " separator (informal listing)
+    if " + " in raw:
+        parts = [p.strip() for p in raw.split(" + ") if p.strip()]
+        if len(parts) >= 2:
+            return parts
 
-    # Split on " và " only when both sides look like distinct questions
-    # (each side has a service keyword or question word)
-    _Q_SIGNALS = ["giá", "bao nhiêu", "sửa", "có", "thế nào", "ra sao",
-                  "như thế", "mấy giờ", "thời gian", "khuyến mãi", "dịch vụ"]
-    and_parts = _re.split(r'\s+và\s+', raw, flags=_re.IGNORECASE)
-    if len(and_parts) >= 2:
-        if all(any(s in p.lower() for s in _Q_SIGNALS) for p in and_parts):
-            return [p.strip() for p in and_parts if p.strip()]
+    # 4. Split on plain ", " or ";" when each part has a distinct question/service signal
+    _Q_SIGNALS = [
+        "giá", "bao nhiêu", "gì", "sao", "thế nào", "ra sao", "như thế",
+        "không", "có", "dịch vụ", "km", "khuyến mãi", "ưu đãi",
+        "sửa", "lắp", "kiểm tra", "hỏng", "bị", "lỗi", "hư",
+        "điện", "nước", "máy lạnh", "xây", "thạch cao",
+        "how much", "what", "when", "price", "service", "fix", "repair",
+    ]
+    for sep in [",", ";"]:
+        sep_parts = [p.strip() for p in raw.split(sep) if p.strip()]
+        if len(sep_parts) >= 2 and len(sep_parts) <= 5:
+            # Require each part to have a recognizable signal
+            if all(any(s in p.lower() for s in _Q_SIGNALS) for p in sep_parts):
+                return sep_parts
+
+    # 5. Split on " và " only when BOTH sides have distinct service/question signals
+    _SERVICE_SIGNALS = [
+        "điện", "nước", "máy lạnh", "xây", "thạch cao", "sơn", "ống",
+        "electric", "water", "pipe", "air con",
+    ]
+    _QUESTION_SIGNALS = [
+        "giá", "bao nhiêu", "thế nào", "ra sao", "có không", "dịch vụ",
+        "how much", "what", "price",
+    ]
+    and_parts = re.split(r'\s+và\s+', raw, flags=re.IGNORECASE)
+    if len(and_parts) == 2:
+        a, b = and_parts[0].lower(), and_parts[1].lower()
+        a_has_service  = any(s in a for s in _SERVICE_SIGNALS)
+        b_has_service  = any(s in b for s in _SERVICE_SIGNALS)
+        a_has_question = any(s in a for s in _QUESTION_SIGNALS)
+        b_has_question = any(s in b for s in _QUESTION_SIGNALS)
+        # Split only if each part is clearly about different things
+        if (a_has_service and b_has_service) or (a_has_question and b_has_question):
+            return [p.strip() for p in and_parts]
 
     return [raw]
 
 
 def _detect_multi_service(query: str, first_tool: str, messages: list, used_tools: list):
     """
-    If the query mentions two different service categories with a clear separator,
-    call both APIs and return a combined answer string directly.
-    Otherwise return first_tool unchanged.
+    If the query mentions two+ different service categories with a clear separator,
+    fetch both raw data blocks and let LLM stitch a combined answer.
+    Otherwise return first_tool unchanged (to let normal path handle it).
     """
     q = _normalize_noaccent((query or "").lower())
+
+    # Quick check: must have at least one separator suggesting two topics
+    _MULTI_SEPARATORS = [
+        " còn ", " và giá ", " với giá ", " or ", " and price",
+        "bao nhiêu,", "bao nhiêu còn", "ngoài ra", "; ",
+        " + ", "cùng với",
+    ]
+    if not any(sep in q for sep in _MULTI_SEPARATORS):
+        return first_tool
+
     service_map = {
-        "điện":     ["điện", "chập", "ổ cắm", "bóng đèn", "công tắc", "aptomat", "dây điện"],
-        "nước":     ["nước", "ống", "rò", "nghẹt", "vòi", "bồn cầu", "máy bơm", "lavabo"],
-        "máy lạnh": ["máy lạnh", "điều hòa", "tủ lạnh", "không lạnh", "máy giặt"],
-        "xây dựng": ["sơn", "chống thấm", "ốp lát", "tường", "ban công", "xây dựng", "dột"],
-        "thạch cao":["thạch cao", "trần", "vách ngăn"],
+        "điện":      ["điện", "chập", "ổ cắm", "bóng đèn", "công tắc", "aptomat", "dây điện"],
+        "nước":      ["nước", "ống", "rò", "nghẹt", "vòi", "bồn cầu", "máy bơm", "lavabo"],
+        "máy lạnh":  ["máy lạnh", "điều hòa", "tủ lạnh", "không lạnh", "máy giặt", "điện lạnh"],
+        "xây dựng":  ["sơn", "chống thấm", "ốp lát", "tường", "ban công", "xây dựng", "dột"],
+        "thạch cao": ["thạch cao", "trần", "vách ngăn"],
     }
     matched = []
     for key, kws in service_map.items():
@@ -519,54 +685,185 @@ def _detect_multi_service(query: str, first_tool: str, messages: list, used_tool
     if len(matched) < 2:
         return first_tool
 
-    _MULTI_SEPARATORS = [" còn ", " và giá ", " với giá ", " or ", " and ",
-                         "bao nhiêu,", "bao nhiêu còn", "giá còn", "ngoài ra", "; "]
-    if not any(sep in q for sep in _MULTI_SEPARATORS):
+    # Fetch raw data for each matched service
+    data_blocks = []
+    for svc in matched[:2]:
+        tool_str = f'CALL_TOOL: get_services(search="{svc}")'
+        block = _fetch_tool_data_block(tool_str, used_tools)
+        if block:
+            data_blocks.append(block)
+
+    if not data_blocks:
         return first_tool
 
-    parts = []
-    for svc in matched[:2]:
-        result = handle_get_services(svc, messages, used_tools)
-        lines = [l for l in result.split("\n") if l.strip() and "muốn mình" not in l]
-        parts.append(f"**{svc.title()}:** " + " ".join(lines[:3]))
+    combined = "\n\n---\n".join(data_blocks)
+    user_lang = _detect_user_language(query)
 
-    return "\n\n".join(parts) + "\n\nChi phí thực tế thợ sẽ báo rõ trước khi làm. Bạn muốn mình hỗ trợ đặt lịch không ạ?"
+    if user_lang == "en":
+        enriched = (
+            f"SYSTEM DATA:\n{combined}\n\n"
+            f"Customer: {query}\n\n"
+            f"Answer both topics naturally in 3-4 sentences. "
+            f"Mention price ranges, say technician confirms exact cost on-site. "
+            f"Do NOT invent information."
+        )
+    else:
+        enriched = (
+            f"DỮ LIỆU HỆ THỐNG:\n{combined}\n\n"
+            f"Khách hỏi: {query}\n\n"
+            f"Trả lời cả hai hạng mục tự nhiên, ngắn gọn (3-4 câu). "
+            f"Nếu có giá: nêu khoảng tham khảo, thợ báo chính xác trước khi làm. "
+            f"KHÔNG bịa thêm thông tin."
+        )
+
+    llm_messages = messages[:-1] + [{"role": "user", "content": enriched}]
+    return llm_chat(llm_messages, temperature=0.1)
 
 
 def _resolve_tool_data(sub_query: str, messages: list, used_tools: list) -> str:
     """
     For a single sub-question, fetch backend data if needed and return
-    a data string to inject into the LLM prompt, or "" if no tool needed.
+    a compact fact-block string to inject into the LLM prompt.
+    Returns "" if no tool needed.
     """
     tool = _detect_tool_intent(sub_query)
     if not tool:
         return ""
-
-    if "get_groups" in tool:
-        return handle_get_groups(messages, used_tools)
-
-    if "get_promotions" in tool:
-        return handle_get_promotions(messages, used_tools)
-
-    if "get_services" in tool:
-        m = re.search(r'search="([^"]*)"', tool)
-        search = normalize_service_search(m.group(1) if m else sub_query)
-        return handle_get_services(search, messages, used_tools)
-
-    return ""
+    return _fetch_tool_data_block(tool, used_tools)
 
 
-def _execute_tool(tool_str: str, messages: list, used_tools: list) -> str:
-    """Execute a CALL_TOOL string and return the result."""
+def _fetch_tool_data_block(tool_str: str, used_tools: list) -> str:
+    """
+    Fetch raw backend data for a CALL_TOOL string and return a compact
+    fact-block string suitable for injecting into an LLM prompt.
+    Returns "" if no matching tool.
+    """
     if "get_groups" in tool_str:
-        return handle_get_groups(messages, used_tools)
+        used_tools.append("Tool [Backend API]: GET /services/groups")
+        groups = fetch_raw_groups()
+        return format_groups_for_llm(groups)
+
     if "get_promotions" in tool_str:
-        return handle_get_promotions(messages, used_tools)
+        used_tools.append("Tool [Backend API]: GET /discounts/available")
+        promos = fetch_raw_promotions()
+        return format_promotions_for_llm(promos)
+
     if "get_services" in tool_str:
         m = re.search(r'search="([^"]*)"', tool_str)
         search = normalize_service_search(m.group(1) if m else "")
-        return handle_get_services(search, messages, used_tools)
+        used_tools.append(f'Tool [Backend API]: GET /services?search="{search}"')
+        services = fetch_raw_services(search)
+        return format_services_for_llm(services, search)
+
     return ""
+
+
+def _detect_user_language(text: str) -> str:
+    """Return 'en' if message is predominantly English, else 'vi'."""
+    en_words = re.findall(
+        r'\b(what|how|can|do|does|is|are|price|service|fix|repair|help|'
+        r'install|replace|cost|check|please|i|the|a|an|my|your|and|or|'
+        r'not|water|electric|air|cold|leak|broken|wall|ceiling)\b',
+        text.lower()
+    )
+    vi_words = re.findall(
+        r'\b(sửa|giá|bao|nhiêu|máy|lạnh|điện|nước|đặt|lịch|không|có|'
+        r'bị|hỏng|ống|tường|thợ|hỗ|trợ|dịch|vụ|mình|bạn|dạ)\b',
+        text.lower()
+    )
+    return "en" if len(en_words) > len(vi_words) else "vi"
+
+
+def _llm_with_injected_data(
+    query: str,
+    data_block: str,
+    messages: list,
+    user_lang: str = "vi",
+) -> str:
+    """
+    Inject backend data as a mandatory fact context, then let LLM answer naturally.
+    Uses a structured few-shot-style prompt so model 3B stays grounded to the data.
+    """
+    if user_lang == "en":
+        instruction = (
+            f"SYSTEM DATA (use only this, do not invent):\n{data_block}\n\n"
+            f"Customer question: {query}\n\n"
+            f"Instructions: Answer naturally in 2-3 sentences using ONLY the data above. "
+            f"If data contains prices, mention the price range and say the technician will confirm exact cost on-site. "
+            f"If data shows 'Báo giá thực tế', say it needs on-site assessment. "
+            f"End with an invitation to book or ask for more details. "
+            f"Do NOT invent any information not in the data."
+        )
+    else:
+        # Vietnamese — structured prompt with explicit do/don't for 3B model
+        instruction = (
+            f"DỮ LIỆU HỆ THỐNG (chỉ dùng thông tin này, không bịa thêm):\n"
+            f"{data_block}\n\n"
+            f"Khách hỏi: {query}\n\n"
+            f"Trả lời theo đúng quy tắc:\n"
+            f"- Ngắn gọn 2-3 câu, giọng thân thiện (dùng 'mình', 'bạn', 'dạ')\n"
+            f"- Nếu có giá trong dữ liệu: nêu khoảng giá tham khảo, nói thợ báo chính xác trước khi làm\n"
+            f"- Nếu dữ liệu ghi 'Báo giá thực tế': nói cần thợ đến kiểm tra mới báo được\n"
+            f"- Nếu dữ liệu là danh sách dịch vụ: tóm tắt tự nhiên, không đọc máy móc\n"
+            f"- Nếu dữ liệu trống: thành thật nói chưa có thông tin, mời đặt thợ kiểm tra\n"
+            f"- Kết thúc: mời đặt lịch hoặc hỏi thêm phù hợp\n"
+            f"- KHÔNG bịa giá, tên dịch vụ, hay thông tin không có trong dữ liệu trên\n"
+        )
+
+    # Keep conversation history but replace last user turn with enriched version
+    llm_messages = messages[:-1] + [{"role": "user", "content": instruction}]
+    return llm_chat(llm_messages, temperature=0.1)
+
+
+def _extract_clean_query(last_user_content: str) -> str:
+    """Strip RAG context prefix from the last user message to get the actual query."""
+    text = last_user_content or ""
+    # Strip injected RAG context block
+    if "Câu hỏi của khách:" in text:
+        return text.split("Câu hỏi của khách:")[-1].strip()
+    if "Ngữ cảnh tham khảo:" in text:
+        parts = text.split("\n\n")
+        return parts[-1].replace("Câu hỏi của khách:\n", "").strip()
+    # Strip any [DỮ LIỆU] block that was injected in a previous turn
+    if "[DỮ LIỆU HỆ THỐNG" in text:
+        if "Câu hỏi:" in text:
+            return text.split("Câu hỏi:")[-1].split("\n")[0].strip()
+        if "Khách hỏi:" in text:
+            return text.split("Khách hỏi:")[-1].split("\n")[0].strip()
+    return text.strip()
+
+
+def _execute_tool(tool_str: str, messages: list, used_tools: list) -> str:
+    """
+    Execute a CALL_TOOL string: fetch backend data, inject into LLM for natural response.
+    Falls back to pre-formatted handlers if data is empty or fetch fails.
+    """
+    # Get clean query from last user message
+    last_user = ""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            last_user = msg.get("content", "")
+            break
+
+    query     = _extract_clean_query(last_user)
+    user_lang = _detect_user_language(query)
+
+    data_block = _fetch_tool_data_block(tool_str, used_tools)
+
+    # If data fetch returned empty/failed, fall back to pre-formatted handlers
+    if not data_block or "không tìm thấy" in data_block.lower():
+        if "get_groups" in tool_str:
+            return handle_get_groups(messages, used_tools)
+        if "get_promotions" in tool_str:
+            return handle_get_promotions(messages, used_tools)
+        if "get_services" in tool_str:
+            m2 = re.search(r'search="([^"]*)"', tool_str)
+            search = normalize_service_search(m2.group(1) if m2 else "")
+            return handle_get_services(search, messages, used_tools)
+        return ""
+
+    # Let LLM answer naturally with injected data + conversation history context
+    return _llm_with_injected_data(query, data_block, messages, user_lang)
 
 
 def _run_legacy_tool_path(query: str, history: list, messages: list, used_tools: list) -> str:
@@ -609,28 +906,37 @@ def _run_legacy_tool_path(query: str, history: list, messages: list, used_tools:
     # 5. Multi-question: split, fetch each tool's data, inject all into ONE LLM call
     sub_questions = _split_questions(query)
     if len(sub_questions) > 1:
-        tool_blocks: list[str] = []
-        pure_llm_parts: list[str] = []
+        data_blocks: list[str] = []
 
         for sub_q in sub_questions:
             tool = _detect_tool_intent(sub_q)
             if tool and tool.startswith("CALL_TOOL:"):
-                data = _execute_tool(tool, messages, used_tools)
-                if data:
-                    tool_blocks.append(data)
-            else:
-                pure_llm_parts.append(sub_q)
+                block = _fetch_tool_data_block(tool, used_tools)
+                if block:
+                    data_blocks.append(block)
 
-        if tool_blocks:
-            tool_context = "\n\n---\n".join(tool_blocks)
-            enriched = (
-                f"{query}\n\n"
-                f"[Dữ liệu hệ thống để trả lời:]\n{tool_context}\n\n"
-                f"Hãy trả lời tất cả các phần của câu hỏi trên dựa vào dữ liệu này. "
-                f"Ngắn gọn, tự nhiên, đúng thông tin."
-            )
+        if data_blocks:
+            tool_context = "\n\n---\n".join(data_blocks)
+            user_lang = _detect_user_language(query)
+            if user_lang == "en":
+                enriched = (
+                    f"SYSTEM DATA (use only this, do not invent):\n{tool_context}\n\n"
+                    f"Customer question: {query}\n\n"
+                    f"Answer each part of the question naturally using the data above. "
+                    f"2-4 sentences total. Mention price ranges if present, say technician "
+                    f"confirms exact cost on-site. Do NOT invent information."
+                )
+            else:
+                enriched = (
+                    f"DỮ LIỆU HỆ THỐNG (chỉ dùng thông tin này, không bịa thêm):\n"
+                    f"{tool_context}\n\n"
+                    f"Khách hỏi: {query}\n\n"
+                    f"Trả lời từng phần tự nhiên, ngắn gọn (2-4 câu tổng). "
+                    f"Nếu có giá: nêu khoảng tham khảo, nói thợ báo chính xác trước khi làm. "
+                    f"KHÔNG bịa thêm thông tin ngoài dữ liệu trên."
+                )
             llm_messages = messages[:-1] + [{"role": "user", "content": enriched}]
-            return llm_chat(llm_messages, temperature=0.2)
+            return llm_chat(llm_messages, temperature=0.1)
 
     # 6. Pure LLM — conversational (comparison, intro, quality, off-topic within scope)
     return llm_chat(messages, temperature=0.2)
