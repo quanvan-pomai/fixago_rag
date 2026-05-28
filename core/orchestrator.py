@@ -3,6 +3,8 @@ core/orchestrator.py
 Orchestration paths: fast path, legacy tool path, native tool path, session persistence.
 """
 import re
+import hashlib
+import json
 
 import rag_engine
 from booking.extractor import detect_negation, merge_booking_info
@@ -11,7 +13,7 @@ from booking.handler import (
     normalize_service_search, repair_booking_tool_call,
 )
 from core.guardrails import static_fallback
-from core.intent_router import detect_tool_intent, is_hours_question
+from core.intent_router import detect_tool_intent, is_hours_question, is_price_question
 from core.output_validator import validate_llm_output
 from core.prompt_builder import compact_history
 from core.query_processor import (
@@ -28,6 +30,7 @@ from booking.extractor import detect_confirmation
 
 _HOURS_FACT = "Fixago hoạt động 24/7, kể cả cuối tuần và ngày lễ."
 _SHORT_YES = {"có", "co", "yes", "ok", "ừ", "uh", "đúng", "dung", "muốn", "muon"}
+_TOOL_ANSWER_TTL_MS = 30 * 60 * 1000
 
 
 def _is_yes_to_service_list(query: str, history: list) -> bool:
@@ -69,18 +72,53 @@ def _extract_clean_query(last_user_content: str) -> str:
     return text.strip()
 
 
-def llm_with_injected_data(query: str, data_block: str, messages: list) -> str:
+def _stable_data_hash(data) -> str:
+    payload = json.dumps(data or [], ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _cache_get_text(key: str) -> str:
+    try:
+        raw = rag_engine.cache.get(key)
+        return raw.decode("utf-8") if raw else ""
+    except Exception:
+        return ""
+
+
+def _cache_set_text(key: str, value: str, ttl_ms: int = _TOOL_ANSWER_TTL_MS) -> None:
+    try:
+        rag_engine.cache.set(key, value.encode("utf-8"), ttl_ms=ttl_ms)
+    except Exception:
+        pass
+
+
+def _tool_answer_cache_key(tool_name: str, query: str, data_hash: str, search: str = "") -> str:
+    kind = "price" if is_price_question(query) else "info"
+    clean_search = (search or "all").strip().lower()
+    return f"tool_answer:{tool_name}:{clean_search}:{kind}:{data_hash}"
+
+
+def llm_with_injected_data(query: str, data_block: str, messages: list, cache_key: str = "") -> str:
     """Inject backend data as [DỮ LIỆU HỆ THỐNG] block, then call LLM."""
+    if cache_key:
+        cached = _cache_get_text(cache_key)
+        if cached:
+            return cached
+
     instruction = (
         f"[DỮ LIỆU HỆ THỐNG — chỉ dùng thông tin này để trả lời, không bịa thêm]\n"
         f"{data_block}\n"
         f"[/DỮ LIỆU]\n\n"
         f"{query}"
     )
-    llm_messages = messages[:-1] + [{"role": "user", "content": instruction}]
+    system_messages = [m for m in messages if m.get("role") == "system"][:1]
+    llm_messages = system_messages + [{"role": "user", "content": instruction}]
     raw = llm_chat(llm_messages, temperature=0.15)
     fix = validate_llm_output(raw, data_block, query)
-    return fix if fix is not None else raw
+    answer = fix if fix is not None else raw
+    if cache_key and answer:
+        _cache_set_text(cache_key, answer)
+    return answer
 
 
 def execute_tool(tool_str: str, messages: list, used_tools: list) -> str:
@@ -100,7 +138,8 @@ def execute_tool(tool_str: str, messages: list, used_tools: list) -> str:
         if not result.ok:
             return _ERR
         if result.data:
-            return llm_with_injected_data(query, format_groups_for_llm(result.data), messages)
+            cache_key = _tool_answer_cache_key("get_groups", query, _stable_data_hash(result.data))
+            return llm_with_injected_data(query, format_groups_for_llm(result.data), messages, cache_key=cache_key)
         return handle_get_groups(messages, used_tools)
 
     if "get_promotions" in tool_str:
@@ -114,7 +153,8 @@ def execute_tool(tool_str: str, messages: list, used_tools: list) -> str:
         if not result.ok:
             return _ERR
         if result.data:
-            return llm_with_injected_data(query, format_services_for_llm(result.data, search), messages)
+            cache_key = _tool_answer_cache_key("get_services", query, _stable_data_hash(result.data), search)
+            return llm_with_injected_data(query, format_services_for_llm(result.data, search), messages, cache_key=cache_key)
         return handle_get_services(search, messages, used_tools)
 
     return ""

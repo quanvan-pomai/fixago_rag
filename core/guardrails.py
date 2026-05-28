@@ -4,6 +4,112 @@ Prompt injection detection, static fallback answers, and off-topic guardrails.
 """
 from core.intent_router import normalize_noaccent, has_tokens, is_hours_question
 
+_FIXIE_GREETING = (
+    "Chào mừng Quý khách hàng đã đến với Fixago — nền tảng dịch vụ sửa chữa xây dựng uy tín. "
+    "Em là Fixie, trợ lý ảo của Fixago, hân hạnh được hỗ trợ!"
+)
+
+_IDENTITY_PATTERNS = [
+    "bạn là ai", "ban la ai", "mày là ai", "you are", "who are you",
+    "tên bạn", "ten ban", "tên gì", "ten gi", "bạn tên", "ban ten",
+    "fixie là ai", "fixie la ai", "fixie là gì", "ai là fixie",
+    "em là ai", "em tên gì", "giới thiệu bản thân", "gioi thieu",
+    "bạn là gì", "ban la gi",
+]
+
+_GREETING_PATTERNS = [
+    "xin chào", "xin chao", "chào bạn", "chao ban", "hello", "hi fixie",
+    "hi fixago", "chào fixie", "chao fixie", "hey fixie", "hey fixago",
+    "good morning", "good afternoon", "good evening",
+    "chào buổi", "chao buoi",
+]
+
+
+def is_greeting_or_identity(query: str) -> bool:
+    q = (query or "").strip().lower()
+    # Pure greeting (short, no service question)
+    _has_service = any(k in q for k in [
+        "dịch vụ", "dich vu", "giá", "gia", "sửa", "sua", "đặt lịch",
+        "dat lich", "bao nhiêu", "bao nhieu", "khuyến mãi", "khuyen mai",
+    ])
+    if _has_service:
+        return False
+    return any(p in q for p in _IDENTITY_PATTERNS + _GREETING_PATTERNS)
+
+
+_AREA_RESPONSE = (
+    "Dạ Fixago hiện đang phục vụ tại TP. Hồ Chí Minh, cụ thể là Quận 2, Quận 9 và TP. Thủ Đức ạ. "
+    "Anh/chị đang ở khu vực nào để mình xem hỗ trợ được không nhé?"
+)
+
+_AREA_PATTERNS = [
+    "khu vực nào", "khu vuc nao", "vùng nào", "vung nao",
+    "phục vụ ở đâu", "phuc vu o dau", "hoạt động ở đâu", "hoat dong o dau",
+    "có ở", "co o", "phủ sóng", "phu song",
+    "quận mấy", "quan may", "địa bàn", "dia ban",
+    "fixago ở đâu", "fixago o dau", "địa chỉ fixago", "dia chi fixago",
+    "có ở quận", "co o quan", "có tới", "co toi",
+    "thủ đức", "thu duc", "quận 2", "quan 2", "quận 9", "quan 9",
+    "hồ chí minh", "ho chi minh", "tphcm", "hcm",
+    "có hỗ trợ", "co ho tro", "có phục vụ", "co phuc vu",
+]
+
+
+def is_area_question(query: str) -> bool:
+    q = normalize_noaccent((query or "").lower())
+    return any(p in q for p in _AREA_PATTERNS)
+
+
+# ── Static FAQ fast-paths ─────────────────────────────────────────────────────
+
+_FAQ = [
+    (
+        ["thanh toán", "thanh toan", "trả tiền", "tra tien", "payment", "pay",
+         "tiền mặt", "tien mat", "chuyển khoản", "chuyen khoan", "cash", "transfer"],
+        "Dạ Fixago nhận thanh toán bằng tiền mặt hoặc chuyển khoản ngân hàng ạ 💳"
+    ),
+    (
+        ["phí di chuyển", "phi di chuyen", "phí đi lại", "phi di lai",
+         "tính thêm phí", "tinh them phi", "travel fee", "transport fee",
+         "đi lại tính tiền", "di lai tinh tien", "phí xăng", "phi xang",
+         "bao gồm di chuyển", "bao gom di chuyen"],
+        "Dạ chi phí di chuyển đã bao gồm trong giá dịch vụ rồi ạ — anh/chị không phát sinh thêm phí đi lại 😊"
+    ),
+    (
+        ["bao lâu", "bao lau", "mấy phút", "may phut", "confirm", "xác nhận lịch",
+         "xac nhan lich", "how long", "how soon", "khi nào", "khi nao",
+         "phản hồi", "phan hoi", "liên hệ lại", "lien he lai", "thời gian xác nhận"],
+        "Dạ sau khi đặt lịch, thợ sẽ liên hệ xác nhận trong vòng 15–30 phút ạ ⏱️"
+    ),
+    (
+        ["đúng thợ", "dung tho", "thợ nào đến", "tho nao den", "ai đến",
+         "biết thợ nào", "biet tho nao", "thông tin thợ", "thong tin tho",
+         "thợ có uy tín", "tho co uy tin", "verify technician", "which technician"],
+        "Dạ trước khi đến, thợ sẽ chủ động liên hệ anh/chị để xác nhận ạ. Anh/chị cũng có thể xem thông tin thợ qua hệ thống Fixago 😊"
+    ),
+    (
+        ["thay khóa", "thay khoa", "khóa cửa", "khoa cua", "khóa", "lock",
+         "locksmith", "door lock", "sửa khóa", "sua khoa"],
+        "Dạ hiện Fixago chưa hỗ trợ dịch vụ thay khóa cửa ạ. Anh/chị cần hỗ trợ dịch vụ khác như điện, nước hay máy lạnh không?"
+    ),
+    (
+        ["đặt lịch như thế nào", "dat lich nhu the nao", "cách đặt", "cach dat",
+         "how to book", "how to order", "đặt hẹn", "dat hen", "book như thế nào",
+         "đăng ký", "dang ky", "order"],
+        "Dạ anh/chị chỉ cần nhắn cho mình tên, số điện thoại, địa chỉ và dịch vụ cần là mình đặt lịch ngay ạ 📋 Thợ sẽ liên hệ xác nhận trong 15–30 phút!"
+    ),
+]
+
+
+def _faq_fallback(query: str) -> str:
+    """Return a static FAQ answer if query matches, else empty string."""
+    q = normalize_noaccent((query or "").lower())
+    for keywords, answer in _FAQ:
+        if any(k in q for k in keywords):
+            return answer
+    return ""
+
+
 _INJECTION_PATTERNS = [
     "tiết lộ system prompt", "show system prompt", "give me your system prompt",
     "ignore previous instruction", "ignore all previous",
@@ -40,6 +146,19 @@ def static_fallback(query: str) -> str:
     Returns "" to pass through to tool/LLM path.
     """
     from booking.extractor import extract_booking_from_text as _ex_check
+
+    # Greeting / identity — always return Fixie's fixed introduction
+    if is_greeting_or_identity(query):
+        return _FIXIE_GREETING
+
+    # Area / coverage question
+    if is_area_question(query):
+        return _AREA_RESPONSE
+
+    # Static FAQ (payment, travel fee, confirm time, technician, lock, booking how-to)
+    faq_ans = _faq_fallback(query)
+    if faq_ans:
+        return faq_ans
 
     raw_q = (query or "").lower()
     q = normalize_noaccent(raw_q)

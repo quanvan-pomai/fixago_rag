@@ -16,6 +16,8 @@ from core.intent_router import detect_tool_intent, is_hours_question, normalize_
     ("chống thấm tường nhà giá sao",    "xây dựng"),
     ("tường bị thấm nước xử lý sao",    "xây dựng"),  # must NOT be "nước"
     ("sửa ổ cắm điện bao nhiêu",        "điện"),
+    ("gia ca sua dien the nao",          "điện"),
+    ("giá cả sửa điện thế nào",          "điện"),
     ("chập điện giá bao nhiêu",          "điện"),
     ("thạch cao trần nhà bao nhiêu",     "thạch cao"),
     ("vách ngăn thạch cao giá sao",      "thạch cao"),

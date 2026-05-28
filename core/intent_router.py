@@ -235,6 +235,15 @@ _SYMPTOM_CONTEXT = [
 ]
 
 
+def _has_specific_service_signal(q: str, raw_lower: str) -> bool:
+    if any(k in raw_lower for k in _NOACCENT_SERVICE):
+        return True
+    for kws in _SERVICE_MAP.values():
+        if any(kw in q for kw in kws):
+            return True
+    return False
+
+
 def detect_tool_intent(query: str) -> str | None:
     """
     Detect which backend tool to call for a given query.
@@ -262,7 +271,8 @@ def detect_tool_intent(query: str) -> str | None:
         return "CALL_TOOL: get_promotions()"
 
     # Generic price (no specific service)
-    if any(k in q for k in _GENERIC_PRICE) or any(k in raw_lower for k in _GENERIC_PRICE_NOACCENT):
+    generic_price = any(k in q for k in _GENERIC_PRICE) or any(k in raw_lower for k in _GENERIC_PRICE_NOACCENT)
+    if generic_price and not _has_specific_service_signal(q, raw_lower):
         return 'CALL_TOOL: get_services(search="all")'
 
     # Service groups
