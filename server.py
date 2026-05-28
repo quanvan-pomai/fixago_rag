@@ -34,6 +34,7 @@ from core.orchestrator import (
 from core.prompt_builder import build_system_prompt, compact_history, load_system_prompt
 from core.rag_enrichment import rewrite_for_rag
 from core.session import SessionManager
+from core.tracer import RequestTrace, mask_phone, set_current_trace_id
 from tools.handlers import (
     fetch_raw_groups, format_groups_for_llm,
     init_cache as _init_tools_cache,
@@ -95,13 +96,20 @@ def query_rag():
     if not query:
         return jsonify({"status": "error", "message": "Missing 'query'"}), 400
 
+    trace = RequestTrace()
+    trace.query_preview = mask_phone(query[:80])
+
     if is_prompt_injection(query):
+        trace.path = "guardrail"
+        trace.emit()
         return jsonify(guardrail_response())
 
     try:
         # ── Session ──────────────────────────────────────────────────────────
         if not session_id:
             session_id = str(uuid.uuid4())
+        trace.session_id = session_id
+        set_current_trace_id(trace.trace_id)
 
         session  = SessionManager.get(session_id)
         client_h = compact_history(data.get("history", []))
@@ -122,6 +130,7 @@ def query_rag():
         # ── System prompt ─────────────────────────────────────────────────────
         base_prompt   = load_system_prompt()
         _early_intent = detect_tool_intent(query)
+        trace.detected_intent = _early_intent or ""
         _catalog      = session.get("catalog_summary", "")
         system        = build_system_prompt(
             base_prompt, session.get("booking_state", {}),
@@ -137,6 +146,9 @@ def query_rag():
             fast_answer = run_legacy_fast_path(query, history, fast_messages, used_tools)
             if fast_answer is not None:
                 persist_session(session_id, session, query, fast_answer)
+                trace.path = "static_fallback"
+                trace.tools_called = used_tools
+                trace.emit()
                 return jsonify({
                     "status": "success",
                     "session_id": session_id,
@@ -176,6 +188,9 @@ def query_rag():
                 cached = rag_engine.cache.get(cache_key)
                 p_res  = rag_engine.cache.prompt_get(tokens) if cached else None
                 if cached:
+                    trace.path = "cache_hit"
+                    trace.cache_hit = True
+                    trace.emit()
                     return jsonify({
                         "status": "success",
                         "session_id": session_id,
@@ -206,6 +221,9 @@ def query_rag():
             if ENABLE_NATIVE_TOOL_CALL
             else run_legacy_tool_path(query, history, messages, used_tools)
         )
+        trace.path = "native_tool" if ENABLE_NATIVE_TOOL_CALL else "legacy_tool"
+        trace.tools_called = used_tools
+        trace.llm_called = True
 
         # ── Persist session ───────────────────────────────────────────────────
         persist_session(session_id, session, query, answer)
@@ -221,6 +239,7 @@ def query_rag():
             except Exception as exc:
                 print(f"Cache write failed: {exc}")
 
+        trace.emit()
         return jsonify({
             "status": "success",
             "session_id": session_id,
@@ -231,6 +250,8 @@ def query_rag():
         })
 
     except Exception as exc:
+        trace.path = trace.path or "error"
+        trace.emit()
         return jsonify({"status": "error", "message": f"LLM query failed: {exc}"}), 500
 
 

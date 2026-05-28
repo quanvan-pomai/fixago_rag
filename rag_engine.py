@@ -9,24 +9,28 @@ to work without changes. The real implementation lives in:
   db/cache_store.py    — key-value + prompt-token cache + tokenizer
 """
 import logging
+import os
 import threading
 
-from db.pomaidb_store import PomaiDBStore, normalize_query, strip_vietnamese_accents
-from db.cache_store import CacheStore
+from db.pomaidb_store import PomaiDBStore, FakePomaiDBStore, normalize_query, strip_vietnamese_accents
+from db.cache_store import CacheStore, FakeCacheStore
 
 logging.basicConfig(
-    level=__import__("os").environ.get("RAG_LOG_LEVEL", "INFO").upper(),
+    level=os.environ.get("RAG_LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 
 # Shared re-entrant lock — both stores use the same lock so no cross-store races
 rag_lock = threading.RLock()
 
-# Singletons initialised once at import time
-_store = PomaiDBStore(lock=rag_lock)
-_cache = CacheStore(lock=rag_lock)
-
-_store.seed()
+# In test mode skip native extensions entirely
+if os.environ.get("FIXAGO_TEST_MODE") == "1":
+    _store = FakePomaiDBStore()
+    _cache = FakeCacheStore()
+else:
+    _store = PomaiDBStore(lock=rag_lock)
+    _cache = CacheStore(lock=rag_lock)
+    _store.seed()
 
 # ── Re-export the cache object so server.py can do `rag_engine.cache.get(...)` ──
 cache = _cache

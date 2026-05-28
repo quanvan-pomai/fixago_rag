@@ -224,3 +224,16 @@ class PomaiDBStore:
             logger.warning("Seed completed with failures: %s", failures)
         else:
             logger.info("Seed completed successfully")
+
+
+class FakePomaiDBStore:
+    """No-op vector store used in FIXAGO_TEST_MODE — no C extension needed."""
+
+    def ingest(self, doc_id, text):
+        pass
+
+    def retrieve(self, query, top_k=5, max_len=65536):
+        return ""
+
+    def seed(self):
+        pass

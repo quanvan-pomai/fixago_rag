@@ -16,6 +16,7 @@ Caching strategy:
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -30,6 +31,21 @@ class FetchResult:
     error: str = ""
 
 logger = logging.getLogger("fixago.tools_handlers")
+
+# Lazy import to avoid circular deps — tracer is always available after core/
+def _audit(tool_name: str, result: "FetchResult", cache_hit: bool, t0: float):
+    try:
+        from core.tracer import audit_tool
+        audit_tool(
+            tool_name=tool_name,
+            fetch_ok=result.ok,
+            item_count=len(result.data),
+            cache_hit=cache_hit,
+            latency_ms=round((time.time() - t0) * 1000, 1),
+            error_type=result.error if not result.ok else "",
+        )
+    except Exception:
+        pass
 
 BACKEND_URL = os.environ.get("BACKEND_API_URL", "http://127.0.0.1:3001/api/v1")
 
@@ -116,22 +132,28 @@ def _build_price_summary(services: List[Dict]) -> str:
 
 def fetch_raw_groups() -> FetchResult:
     """Return raw group list. Served from cache when available."""
+    t0 = time.time()
     cache_key = "grp_cache"
     cached = _cache_get(cache_key)
     if cached is not None:
         logger.debug("cache HIT: %s", cache_key)
-        return FetchResult(ok=True, data=cached)
+        r = FetchResult(ok=True, data=cached)
+        _audit("get_groups", r, cache_hit=True, t0=t0)
+        return r
 
     try:
         resp = requests.get(f"{BACKEND_URL}/services/groups", timeout=3)
         if resp.status_code == 200:
             data = resp.json() or []
             _cache_set(cache_key, data, _GRP_TTL_MS)
-            return FetchResult(ok=True, data=data)
-        return FetchResult(ok=False, error=f"HTTP {resp.status_code}")
+            r = FetchResult(ok=True, data=data)
+        else:
+            r = FetchResult(ok=False, error=f"HTTP {resp.status_code}")
     except Exception as exc:
         logger.warning("fetch_raw_groups error: %s", exc)
-        return FetchResult(ok=False, error=str(exc))
+        r = FetchResult(ok=False, error=str(exc))
+    _audit("get_groups", r, cache_hit=False, t0=t0)
+    return r
 
 
 def fetch_raw_services(search_arg: str) -> FetchResult:
@@ -139,11 +161,14 @@ def fetch_raw_services(search_arg: str) -> FetchResult:
     Return raw service list for search_arg. Served from cache when available.
     search_arg="all" fetches a broad sample across multiple categories.
     """
+    t0 = time.time()
     cache_key = f"svc_cache:{search_arg}"
     cached = _cache_get(cache_key)
     if cached is not None:
         logger.debug("cache HIT: %s", cache_key)
-        return FetchResult(ok=True, data=cached)
+        r = FetchResult(ok=True, data=cached)
+        _audit("get_services", r, cache_hit=True, t0=t0)
+        return r
 
     try:
         if search_arg == "all":
@@ -157,7 +182,9 @@ def fetch_raw_services(search_arg: str) -> FetchResult:
                 if resp.status_code == 200:
                     all_services.extend(resp.json().get("data", []))
             _cache_set(cache_key, all_services, _SVC_TTL_MS)
-            return FetchResult(ok=True, data=all_services)
+            r = FetchResult(ok=True, data=all_services)
+            _audit("get_services", r, cache_hit=False, t0=t0)
+            return r
 
         resp = requests.get(
             f"{BACKEND_URL}/services",
@@ -176,20 +203,26 @@ def fetch_raw_services(search_arg: str) -> FetchResult:
                 if fb.status_code == 200:
                     services = fb.json().get("data", [])
             _cache_set(cache_key, services, _SVC_TTL_MS)
-            return FetchResult(ok=True, data=services)
-        return FetchResult(ok=False, error=f"HTTP {resp.status_code}")
+            r = FetchResult(ok=True, data=services)
+        else:
+            r = FetchResult(ok=False, error=f"HTTP {resp.status_code}")
     except Exception as exc:
         logger.warning("fetch_raw_services error: %s", exc)
-        return FetchResult(ok=False, error=str(exc))
+        r = FetchResult(ok=False, error=str(exc))
+    _audit("get_services", r, cache_hit=False, t0=t0)
+    return r
 
 
 def fetch_raw_promotions() -> FetchResult:
     """Return raw promotion list. Served from cache when available."""
+    t0 = time.time()
     cache_key = "promo_cache"
     cached = _cache_get(cache_key)
     if cached is not None:
         logger.debug("cache HIT: %s", cache_key)
-        return FetchResult(ok=True, data=cached)
+        r = FetchResult(ok=True, data=cached)
+        _audit("get_promotions", r, cache_hit=True, t0=t0)
+        return r
 
     try:
         resp = requests.get(f"{BACKEND_URL}/discounts/available", timeout=3)
@@ -197,11 +230,14 @@ def fetch_raw_promotions() -> FetchResult:
             raw  = resp.json()
             data = raw if isinstance(raw, list) else raw.get("data", [])
             _cache_set(cache_key, data, _PROMO_TTL_MS)
-            return FetchResult(ok=True, data=data)
-        return FetchResult(ok=False, error=f"HTTP {resp.status_code}")
+            r = FetchResult(ok=True, data=data)
+        else:
+            r = FetchResult(ok=False, error=f"HTTP {resp.status_code}")
     except Exception as exc:
         logger.warning("fetch_raw_promotions error: %s", exc)
-        return FetchResult(ok=False, error=str(exc))
+        r = FetchResult(ok=False, error=str(exc))
+    _audit("get_promotions", r, cache_hit=False, t0=t0)
+    return r
 
 
 def _fmt(price: int) -> str:

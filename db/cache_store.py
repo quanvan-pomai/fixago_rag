@@ -102,3 +102,26 @@ class CacheStore:
         except Exception as exc:
             logger.warning("Tokenizer request failed: %s", exc)
         return list(safe.encode("utf-8"))
+
+
+class FakeCacheStore:
+    """In-memory drop-in replacement for CacheStore used in FIXAGO_TEST_MODE."""
+
+    def __init__(self):
+        self._store: dict = {}
+
+    def get(self, key: str) -> Optional[bytes]:
+        return self._store.get(key)
+
+    def set(self, key: str, value: bytes, ttl_ms: int = 0) -> bool:
+        self._store[key] = value if isinstance(value, bytes) else str(value).encode()
+        return True
+
+    def prompt_get(self, tokens: List[int]) -> Any:
+        return None
+
+    def prompt_put(self, tokens: List[int], value: bytes, ttl_ms: int = 0) -> bool:
+        return True
+
+    def tokenize(self, text: Any) -> List[int]:
+        return []
