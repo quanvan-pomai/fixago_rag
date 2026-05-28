@@ -17,7 +17,6 @@ All business logic lives in core/ and dedicated modules:
   llm_client/client.py     — LLM calls
   db/                      — vector store + cache
 """
-import hashlib
 import os
 import uuid
 
@@ -25,14 +24,21 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_file
 
 import rag_engine
+from core.cache_policy import make_cache_key, should_cache_response
 from core.guardrails import guardrail_response, is_prompt_injection
-from core.intent_router import detect_tool_intent
+from core.intent_router import classify_intent, detect_tool_intent
+from core.memory.memory_retriever import MemoryRetriever, format_memory_block
+from core.memory.memory_store import MemoryStore
+from core.memory.memory_writer import get_default_writer
+from core.memory.memory_policy import mask_pii
 from core.orchestrator import (
     persist_session, run_legacy_fast_path,
     run_legacy_tool_path, run_native_tool_path,
 )
+from core.policy import policy_for_intent
 from core.prompt_builder import build_system_prompt, compact_history, load_system_prompt
 from core.rag_enrichment import rewrite_for_rag
+from core.retrieval import should_retrieve_context
 from core.session import SessionManager
 from core.tracer import RequestTrace, mask_phone, set_current_trace_id
 from tools.handlers import (
@@ -44,6 +50,8 @@ load_dotenv()
 
 # Inject shared cache into tools so API responses are cached automatically
 _init_tools_cache(rag_engine.cache)
+_memory_retriever = MemoryRetriever()
+_memory_writer = get_default_writer()
 
 # Set ENABLE_NATIVE_TOOL_CALL=1 when cheese-server is started with --jinja.
 ENABLE_NATIVE_TOOL_CALL = os.environ.get("ENABLE_NATIVE_TOOL_CALL", "0") in ("1", "true", "yes")
@@ -86,12 +94,47 @@ def retrieve():
         return jsonify({"status": "error", "message": str(exc)}), 500
 
 
+@app.route("/api/v1/memory/debug", methods=["GET"])
+def memory_debug():
+    if os.environ.get("FIXAGO_DEBUG") != "1":
+        return jsonify({"status": "error", "message": "Not found"}), 404
+    expected = os.environ.get("FIXAGO_ADMIN_TOKEN", "")
+    if not expected or request.headers.get("X-Admin-Token") != expected:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+
+    session_id = request.args.get("session_id")
+    user_id = request.args.get("user_id")
+    store = MemoryStore()
+    entries = store.list(session_id=session_id, user_id=user_id)
+    return jsonify({
+        "status": "success",
+        "entries": [
+            {
+                "id": e.id,
+                "scope": e.scope.value,
+                "type": e.type.value,
+                "source": e.source,
+                "confidence": e.confidence,
+                "created_at": e.created_at,
+                "updated_at": e.updated_at,
+                "expires_at": e.expires_at,
+                "tags": e.tags,
+                "pii_level": e.pii_level.value,
+                "allowed_for_prompt": e.allowed_for_prompt,
+                "content_preview": mask_pii(e.content[:160]),
+            }
+            for e in entries
+        ],
+    })
+
+
 @app.route("/api/v1/rag/query", methods=["POST"])
 def query_rag():
     data       = request.json or {}
     query      = data.get("query")
     use_cache  = data.get("use_cache", False)
     session_id = data.get("session_id")
+    user_id    = data.get("user_id")
 
     if not query:
         return jsonify({"status": "error", "message": "Missing 'query'"}), 400
@@ -128,11 +171,26 @@ def query_rag():
                 pass
 
         # ── System prompt ─────────────────────────────────────────────────────
-        base_prompt   = load_system_prompt()
-        _early_intent = detect_tool_intent(query)
-        trace.detected_intent = _early_intent or ""
-        _catalog      = session.get("catalog_summary", "")
-        system        = build_system_prompt(
+        base_prompt    = load_system_prompt()
+        _early_intent  = detect_tool_intent(query)
+        _intent_result = classify_intent(query)
+        _policy        = policy_for_intent(_intent_result, query)
+        trace.detected_intent   = _early_intent or ""
+        trace.intent_confidence = _intent_result.confidence.value
+        trace.policy_type       = _policy.policy_type.value
+        memory_result = _memory_retriever.retrieve(
+            query=query,
+            policy=_policy,
+            session_id=session_id,
+            user_id=user_id,
+        )
+        trace.memory_retrieval_enabled = memory_result.enabled
+        trace.memory_entries_selected_count = len(memory_result.entries)
+        trace.memory_scopes_used = sorted({m.entry.scope.value for m in memory_result.entries})
+        trace.memory_token_budget_used = memory_result.token_budget_used
+        memory_block = format_memory_block(memory_result.entries)
+        _catalog       = session.get("catalog_summary", "")
+        system         = build_system_prompt(
             base_prompt, session.get("booking_state", {}),
             ENABLE_NATIVE_TOOL_CALL, _early_intent, _catalog,
         )
@@ -146,6 +204,16 @@ def query_rag():
             fast_answer = run_legacy_fast_path(query, history, fast_messages, used_tools)
             if fast_answer is not None:
                 persist_session(session_id, session, query, fast_answer)
+                trace.memory_write_count = _memory_writer.update_after_turn(
+                    query=query,
+                    response=fast_answer,
+                    tool_calls=used_tools,
+                    session=session,
+                    session_id=session_id,
+                    user_id=user_id,
+                    trace_id=trace.trace_id,
+                )
+                trace.memory_write_rejected_reason = _memory_writer.last_rejected_reason
                 trace.path = "static_fallback"
                 trace.tools_called = used_tools
                 trace.emit()
@@ -160,8 +228,9 @@ def query_rag():
 
         # ── RAG context ───────────────────────────────────────────────────────
         rag_context = ""
-        _skip_rag   = bool(_early_intent and "get_services" in _early_intent)
-        if not _skip_rag:
+        _do_rag     = should_retrieve_context(query, _intent_result, _policy)
+        trace.retrieve_context = _do_rag
+        if _do_rag:
             try:
                 _rewritten  = rewrite_for_rag(query, _early_intent)
                 rag_context = rag_engine.retrieve_context(
@@ -177,16 +246,16 @@ def query_rag():
             f"{m.get('role')}: {m.get('content', '')}"
             for m in compact_history(history)
         )
-        cache_seed = f"System:{system}\nHistory:{history_text}\nContext:{rag_context}\nQ:{query}"
-        tokens     = []
-        cache_key  = ""
+        tokens    = []
+        cache_key = ""
 
-        if use_cache:
+        _use_cache_this_req = use_cache and should_cache_response(_policy, trace.backend_ok)
+        if _use_cache_this_req:
             try:
-                tokens    = rag_engine.tokenize_text(cache_seed)
-                cache_key = f"pomai_cache:response:{hashlib.sha256(cache_seed.encode()).hexdigest()}"
-                cached = rag_engine.cache.get(cache_key)
-                p_res  = rag_engine.cache.prompt_get(tokens) if cached else None
+                cache_key = make_cache_key(system, history_text, "", rag_context, query)
+                tokens    = rag_engine.tokenize_text(cache_key)
+                cached    = rag_engine.cache.get(cache_key)
+                p_res     = rag_engine.cache.prompt_get(tokens) if cached else None
                 if cached:
                     trace.path = "cache_hit"
                     trace.cache_hit = True
@@ -207,12 +276,15 @@ def query_rag():
         # ── Build messages ────────────────────────────────────────────────────
         messages = [{"role": "system", "content": system}]
         messages.extend(compact_history(history, max_items=6))
+        context_parts = []
+        if memory_block:
+            context_parts.append(memory_block)
+        if rag_context:
+            context_parts.append(f"Ngữ cảnh tham khảo:\n{rag_context}")
+        context_prefix = "\n\n".join(context_parts)
         messages.append({
             "role": "user",
-            "content": (
-                f"Ngữ cảnh tham khảo:\n{rag_context}\n\nCâu hỏi của khách:\n{query}"
-                if rag_context else query
-            ),
+            "content": f"{context_prefix}\n\nCâu hỏi của khách:\n{query}" if context_prefix else query,
         })
 
         # ── Orchestrate ───────────────────────────────────────────────────────
@@ -227,13 +299,23 @@ def query_rag():
 
         # ── Persist session ───────────────────────────────────────────────────
         persist_session(session_id, session, query, answer)
+        trace.memory_write_count = _memory_writer.update_after_turn(
+            query=query,
+            response=answer,
+            tool_calls=used_tools,
+            session=session,
+            session_id=session_id,
+            user_id=user_id,
+            trace_id=trace.trace_id,
+        )
+        trace.memory_write_rejected_reason = _memory_writer.last_rejected_reason
 
         # ── Write cache ───────────────────────────────────────────────────────
-        if use_cache:
+        if _use_cache_this_req:
             try:
                 if not cache_key:
-                    tokens    = rag_engine.tokenize_text(cache_seed)
-                    cache_key = f"pomai_cache:response:{hashlib.sha256(cache_seed.encode()).hexdigest()}"
+                    cache_key = make_cache_key(system, history_text, "", rag_context, query)
+                    tokens    = rag_engine.tokenize_text(cache_key)
                 rag_engine.cache.set(cache_key, answer.encode("utf-8"), ttl_ms=600_000)
                 rag_engine.cache.prompt_put(tokens, answer.encode("utf-8"), ttl_ms=600_000)
             except Exception as exc:

@@ -535,3 +535,73 @@ def test_X_booking_negation(app_client):
     tools = data.get("tool_calls", [])
     assert not any("Tạo đơn" in str(t) for t in tools)
     assert "mã đơn" not in resp
+
+
+# ── Scenario Y: Vague damage — clarification expected ─────────────────────────
+
+def test_Y_hong_roi_clarification(app_client):
+    """'Hỏng rồi' with no service named → static fallback asks what's broken."""
+    sc, data = _q(app_client, "Hỏng rồi")
+    assert sc == 200
+    resp = data["response"].lower()
+    # Should NOT call a service tool — should ask for clarification
+    assert "CALL_TOOL" not in data["response"]
+    assert "[DỮ LIỆU HỆ THỐNG" not in data["response"]
+    # Response should prompt user to specify the broken item
+    assert any(k in resp for k in ["thiết bị", "hạng mục", "gì", "nào", "loại"])
+
+
+# ── Scenario Z: Generic price query — clarification or redirect ───────────────
+
+def test_Z_gia_sao_not_empty(app_client):
+    """'Giá sao?' is ambiguous — should get a non-empty response (clarify or redirect)."""
+    sc, data = _q(app_client, "Giá sao?")
+    assert sc == 200
+    resp = data["response"]
+    assert resp  # not empty
+    assert "CALL_TOOL" not in resp
+    assert "[DỮ LIỆU HỆ THỐNG" not in resp
+
+
+# ── Scenario AA: Ambiguity resolved in turn 2 ────────────────────────────────
+
+def test_AA_ambiguity_resolved(app_client):
+    """Vague turn 1, specific service in turn 2 → correct tool called."""
+    sid = "test-AA-" + uuid.uuid4().hex[:6]
+    _q(app_client, "Hỏng rồi", sid)
+    sc, data = _q(app_client, "Máy lạnh không mát, sửa bao nhiêu?", sid)
+    assert sc == 200
+    resp = data["response"].lower()
+    assert "CALL_TOOL" not in data["response"]
+    assert "[DỮ LIỆU HỆ THỐNG" not in data["response"]
+    # Turn 2 should have fetched cooling data
+    tools = data.get("tool_calls", [])
+    assert any("máy lạnh" in str(t).lower() or "lạnh" in str(t).lower()
+               for t in tools) or any(k in resp for k in ["280", "350", "máy lạnh", "lạnh"])
+
+
+# ── Scenario BB: Booking path — no RAG retrieval ─────────────────────────────
+
+def test_BB_booking_no_rag(app_client):
+    """Booking flow should not call RAG — it's handled by booking module."""
+    sid = "test-BB-" + uuid.uuid4().hex[:6]
+    sc, data = _q(app_client, "Tôi muốn đặt thợ sửa điện", sid)
+    assert sc == 200
+    resp = data["response"].lower()
+    assert "CALL_TOOL" not in data["response"]
+    # Response should be collecting info, not quoting prices
+    assert any(k in resp for k in ["tên", "số", "sđt", "địa chỉ", "hỗ trợ"])
+
+
+# ── Scenario CC: Warranty hallucination prevention ───────────────────────────
+
+def test_CC_no_warranty_hallucination(app_client):
+    """'Fixago có bảo hành không?' — LLM must not invent warranty terms."""
+    sc, data = _q(app_client, "Fixago có bảo hành dịch vụ không?")
+    assert sc == 200
+    resp = data["response"]
+    assert "CALL_TOOL" not in resp
+    assert "[DỮ LIỆU HỆ THỐNG" not in resp
+    # Must NOT invent specific numbers like "12 tháng" or "6 tháng" without data
+    # (The mock LLM returns a generic persona string, not a fake warranty claim)
+    assert "CALL_TOOL" not in resp

@@ -88,6 +88,21 @@ def static_fallback(query: str) -> str:
             "bạn đặt lịch bất kỳ lúc nào, thợ sẽ liên hệ xác nhận thời gian sớm nhất nhé."
         )
 
+    # Off-topic: product/food/drink sales. This must run before generic
+    # service routing so "nuoc mia" is not treated as plumbing "nước".
+    _PRODUCT_SALES_Q = [
+        "nước mía", "nước mia", "nuoc mia",
+        "bán nước", "ban nuoc", "bán đồ uống", "ban do uong",
+        "đồ uống", "do uong", "trà sữa", "tra sua",
+        "cà phê", "ca phe", "cafe", "coffee",
+        "bán thức ăn", "ban thuc an", "đồ ăn", "do an",
+    ]
+    if any(k in raw_q or k in q for k in _PRODUCT_SALES_Q):
+        return (
+            "Dạ Fixago không bán nước mía hay đồ uống ạ. "
+            "Mình chỉ hỗ trợ dịch vụ sửa chữa điện, nước, máy lạnh, xây dựng và thạch cao tại nhà."
+        )
+
     # Off-topic
     if any(k in q for k in ["nấu phở", "tình yêu", "love poem", "thơ tình", "bài thơ",
                               "nấu ăn", "recipe", "cooking", "bóng đá", "football",
@@ -138,6 +153,21 @@ def static_fallback(query: str) -> str:
             "Dạ giá của Fixago tùy theo hạng mục và tình trạng thực tế — "
             "thợ sẽ báo rõ chi phí trước khi làm bạn nhé. "
             "Bạn đang cần tư vấn dịch vụ nào ạ? (điện, nước, máy lạnh, xây dựng...)"
+        )
+
+    # Short comparison / why Fixago question. Keep deterministic so small models
+    # do not generate long marketing lists.
+    _COMPARISON_Q = [
+        "hơn gì", "hon gi", "khác gì", "khac gi", "khác với", "khac voi",
+        "so với", "so voi", "chỗ khác", "cho khac", "bên khác", "ben khac",
+        "app khác", "app khac", "nền tảng khác", "nen tang khac",
+        "tại sao chọn fixago", "tai sao chon fixago", "sao phải đặt fixago",
+        "thay vì", "thay vi", "thợ ngoài", "tho ngoai", "thợ tự do", "tho tu do",
+    ]
+    if any(k in q for k in _COMPARISON_Q):
+        return (
+            "Dạ Fixago hơn ở chỗ thợ được xác minh, đặt lịch rõ ràng và chi phí báo trước khi làm. "
+            "Nếu có vấn đề sau dịch vụ, Fixago cũng có kênh hỗ trợ để xử lý tiếp cho bạn."
         )
 
     return ""

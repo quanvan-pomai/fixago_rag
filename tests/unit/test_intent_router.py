@@ -45,6 +45,16 @@ def test_may_lanh_not_nuoc():
     assert '"máy lạnh"' in result
 
 
+@pytest.mark.parametrize("query", [
+    "fixago co ban nuoc mia khong?",
+    "có bán nước mía không",
+    "bên bạn có bán đồ uống không",
+])
+def test_product_sales_not_routed_to_water_service(query):
+    result = detect_tool_intent(query)
+    assert result is None
+
+
 # ── Group pattern ─────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("query", [

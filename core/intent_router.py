@@ -89,6 +89,14 @@ _BOOKING_TRIGGER_WORDS = [
     "hẹn thợ", "cử thợ", "cho thợ", "hỗ trợ đặt",
 ]
 
+_OFF_DOMAIN_PRODUCT_WORDS = [
+    "nước mía", "nước mia", "nuoc mia",
+    "bán nước", "ban nuoc", "bán đồ uống", "ban do uong",
+    "đồ uống", "do uong", "trà sữa", "tra sua",
+    "cà phê", "ca phe", "cafe", "coffee",
+    "bán thức ăn", "ban thuc an", "đồ ăn", "do an",
+]
+
 _PRIORITY_CHECKS = [
     ("máy lạnh", None, [
         "máy lạnh", "điều hòa", "điều hoà", "tủ lạnh", "tủ đông",
@@ -231,7 +239,11 @@ def detect_tool_intent(query: str) -> str | None:
     Returns a CALL_TOOL string or None.
     """
     raw = (query or "").strip()
+    raw_lower = raw.lower()
     q   = normalize_noaccent(raw.lower())
+
+    if any(k in q or k in raw_lower for k in _OFF_DOMAIN_PRODUCT_WORDS):
+        return None
 
     is_booking_trigger = any(k in q for k in _BOOKING_TRIGGER_WORDS)
     if is_booking_trigger and not any(k in q for k in [
@@ -248,7 +260,6 @@ def detect_tool_intent(query: str) -> str | None:
         return "CALL_TOOL: get_promotions()"
 
     # Generic price (no specific service)
-    raw_lower = raw.lower()
     if any(k in q for k in _GENERIC_PRICE) or any(k in raw_lower for k in _GENERIC_PRICE_NOACCENT):
         return 'CALL_TOOL: get_services(search="all")'
 
@@ -292,3 +303,49 @@ def detect_tool_intent(query: str) -> str | None:
                 return f'CALL_TOOL: get_services(search="{key}")'
 
     return None
+
+
+# ── Generic price query helper ────────────────────────────────────────────────
+
+def _is_generic_price_query(q_lower: str) -> bool:
+    """Return True when the query asks about price without naming a specific service."""
+    return any(k in q_lower for k in _GENERIC_PRICE + _GENERIC_PRICE_NOACCENT)
+
+
+# ── Structured intent classification ─────────────────────────────────────────
+
+def classify_intent(query: str):
+    """
+    Return an IntentResult wrapping detect_tool_intent() with confidence scoring.
+    Imported here lazily to avoid circular imports at module load time.
+    """
+    from core.intent_result import Confidence, IntentResult
+
+    tool_call_str = detect_tool_intent(query)
+    signals: list = []
+    confidence = Confidence.HIGH
+    ambiguity = None
+
+    q_lower = (query or "").lower()
+
+    if tool_call_str and "get_services" in tool_call_str:
+        if _is_generic_price_query(q_lower) or 'search="all"' in tool_call_str:
+            confidence = Confidence.MEDIUM
+            ambiguity = "generic price — specific service unclear"
+        else:
+            signals.append("explicit_service_keyword")
+    elif tool_call_str and "get_groups" in tool_call_str:
+        signals.append("list_services_keyword")
+    elif tool_call_str and "get_promotions" in tool_call_str:
+        signals.append("promotions_keyword")
+    elif tool_call_str is None:
+        if not query.strip():
+            confidence = Confidence.LOW
+            ambiguity = "empty query"
+
+    return IntentResult(
+        tool_call_str=tool_call_str,
+        confidence=confidence,
+        matched_signals=signals,
+        ambiguity_reason=ambiguity,
+    )

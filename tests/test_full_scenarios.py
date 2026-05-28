@@ -727,6 +727,21 @@ SCENARIOS = [
         ],
     ),
     Scenario(
+        name="23A. So sánh ngắn không dấu",
+        tags=["sales", "comparison", "noaccent"],
+        turns=[
+            T(
+                "fixago hon gi nhung cho khac?",
+                E(
+                    checks=["mentions_fixago", "service_answer"],
+                    contains_any=["thợ", "xác minh", "đặt lịch", "chi phí", "hỗ trợ"],
+                    not_contains_any=["1.", "2.", "3.", "**", "đánh giá khách hàng"],
+                    max_len=240,
+                ),
+            ),
+        ],
+    ),
+    Scenario(
         name="24. Khách khó tính chửi nhẹ",
         tags=["tone", "vi"],
         turns=[

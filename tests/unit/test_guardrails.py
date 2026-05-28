@@ -45,6 +45,19 @@ def test_offtopic_poem():
     assert result, "Expected non-empty fallback for off-topic poem"
 
 
+@pytest.mark.parametrize("query", [
+    "fixago co ban nuoc mia khong?",
+    "có bán nước mía không",
+    "bên bạn có bán đồ uống không",
+])
+def test_offtopic_product_sales(query):
+    result = static_fallback(query)
+    assert result, "Expected product sales to be handled statically"
+    assert "không bán" in result.lower()
+    assert "sửa chữa" in result.lower()
+    assert "máy lạnh" in result.lower()
+
+
 def test_hours_fallback():
     result = static_fallback("Giờ làm việc bên bạn thế nào?")
     assert result, "Expected non-empty fallback for hours question"
