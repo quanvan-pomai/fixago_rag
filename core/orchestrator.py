@@ -27,6 +27,30 @@ from tools.handlers import (
 from booking.extractor import detect_confirmation
 
 _HOURS_FACT = "Fixago hoạt động 24/7, kể cả cuối tuần và ngày lễ."
+_SHORT_YES = {"có", "co", "yes", "ok", "ừ", "uh", "đúng", "dung", "muốn", "muon"}
+
+
+def _is_yes_to_service_list(query: str, history: list) -> bool:
+    """Treat short yes/no-accent replies as consent to the previous service-list clarification."""
+    q = (query or "").strip().lower().strip(" .,!?;:")
+    if q not in _SHORT_YES:
+        return False
+
+    for msg in reversed(history or []):
+        if msg.get("role") != "assistant":
+            continue
+        content = (msg.get("content") or "").lower()
+        if any(k in content for k in [
+            "fixago có dịch vụ gì",
+            "fixago co dich vu gi",
+            "bạn muốn biết fixago có dịch vụ",
+            "ban muon biet fixago co dich vu",
+            "dịch vụ gì không",
+            "dich vu gi khong",
+        ]):
+            return True
+        return False
+    return False
 
 
 def _extract_clean_query(last_user_content: str) -> str:
@@ -105,6 +129,9 @@ def run_legacy_fast_path(query: str, history: list, messages: list, used_tools: 
     if static_early:
         return static_early
 
+    if _is_yes_to_service_list(query, history):
+        return execute_tool("CALL_TOOL: get_groups()", messages, used_tools)
+
     _hint_tool = detect_tool_intent(query)
     _has_service_hint = _hint_tool and "get_services" in str(_hint_tool)
     if not detect_negation(query) and not _has_service_hint:
@@ -137,6 +164,9 @@ def run_legacy_tool_path(query: str, history: list, messages: list, used_tools: 
     static_early = static_fallback(query)
     if static_early:
         return static_early
+
+    if _is_yes_to_service_list(query, history):
+        return execute_tool("CALL_TOOL: get_groups()", messages, used_tools)
 
     # 2. Booking flow
     _hint_tool = detect_tool_intent(query)

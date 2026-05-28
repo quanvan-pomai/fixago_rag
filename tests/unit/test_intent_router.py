@@ -61,6 +61,9 @@ def test_product_sales_not_routed_to_water_service(query):
     "Fixago có dịch vụ gì?",
     "bên bạn làm gì",
     "có sửa gì không",
+    "fixago co gi",
+    "ben ban co gi",
+    "co dich vu gi",
     "What services do you offer?",
     "what can fixago do",
 ])

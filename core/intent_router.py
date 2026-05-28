@@ -196,6 +196,8 @@ _GROUP_PATTERNS = [
 _GROUP_NOACCENT = [
     "co sua gi", "lam gi", "ho tro gi", "dich vu gi", "cung cap gi",
     "hang muc gi", "co the sua gi", "sua duoc gi",
+    "fixago co gi", "co gi", "ben ban co gi", "co nhung gi",
+    "fixago co dich vu gi", "co dich vu gi",
 ]
 
 _GENERIC_PRICE = [
