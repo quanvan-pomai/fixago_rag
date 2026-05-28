@@ -45,13 +45,15 @@ _AREA_RESPONSE = (
 _AREA_PATTERNS = [
     "khu vực nào", "khu vuc nao", "vùng nào", "vung nao",
     "phục vụ ở đâu", "phuc vu o dau", "hoạt động ở đâu", "hoat dong o dau",
-    "có ở", "co o", "phủ sóng", "phu song",
+    "phủ sóng", "phu song",
     "quận mấy", "quan may", "địa bàn", "dia ban",
     "fixago ở đâu", "fixago o dau", "địa chỉ fixago", "dia chi fixago",
+    "công ty ở đâu", "cong ty o dau", "trụ sở", "tru so",
     "có ở quận", "co o quan", "có tới", "co toi",
     "thủ đức", "thu duc", "quận 2", "quan 2", "quận 9", "quan 9",
     "hồ chí minh", "ho chi minh", "tphcm", "hcm",
     "có hỗ trợ", "co ho tro", "có phục vụ", "co phuc vu",
+    "ở đâu vậy", "o dau vay", "ở đâu ạ", "o dau a",
 ]
 
 

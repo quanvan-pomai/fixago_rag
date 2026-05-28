@@ -275,8 +275,8 @@ def detect_tool_intent(query: str) -> str | None:
     if generic_price and not _has_specific_service_signal(q, raw_lower):
         return 'CALL_TOOL: get_services(search="all")'
 
-    # Service groups
-    if any(k in q for k in _GROUP_PATTERNS):
+    # Service groups — only if no specific service is mentioned in the same query
+    if any(k in q for k in _GROUP_PATTERNS) and not _has_specific_service_signal(q, raw_lower):
         return "CALL_TOOL: get_groups()"
 
     # Priority checks (resolve ambiguous cases first)
