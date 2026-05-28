@@ -43,6 +43,13 @@ class CacheStore:
             data_dir=str(pomaicache_dir),
             memory_limit_bytes=RAG_CACHE_MEMORY_LIMIT_BYTES,
         )
+        self._kv_fallback: dict[str, tuple[bytes, float | None]] = {}
+        self._has_native_kv = hasattr(self._cache, "get") and hasattr(self._cache, "set")
+        if not self._has_native_kv:
+            logger.warning(
+                "PomaiCache binding has no key-value get/set API; using process-local KV fallback. "
+                "Rebuild pomaicache to enable native persistent session/memory cache."
+            )
         self._lock = lock
         logger.info("PomaiCache initialized at %s", pomaicache_dir)
 
@@ -52,6 +59,8 @@ class CacheStore:
         if not key:
             return None
         with self._lock:
+            if not self._has_native_kv:
+                return self._fallback_get(key)
             return self._cache.get(key)
 
     def set(self, key: str, value: bytes, ttl_ms: int = 600_000) -> bool:
@@ -60,8 +69,29 @@ class CacheStore:
         if not isinstance(value, bytes):
             value = str(value).encode("utf-8")
         with self._lock:
+            if not self._has_native_kv:
+                self._fallback_set(key, value, ttl_ms)
+                return True
             self._cache.set(key, value, ttl_ms=ttl_ms)
         return True
+
+    def _fallback_get(self, key: str) -> Optional[bytes]:
+        import time
+
+        item = self._kv_fallback.get(key)
+        if not item:
+            return None
+        value, expires_at = item
+        if expires_at is not None and expires_at <= time.time():
+            self._kv_fallback.pop(key, None)
+            return None
+        return value
+
+    def _fallback_set(self, key: str, value: bytes, ttl_ms: int = 600_000) -> None:
+        import time
+
+        expires_at = None if ttl_ms == 0 else time.time() + (ttl_ms / 1000.0)
+        self._kv_fallback[key] = (value, expires_at)
 
     # ── Prompt-token cache ───────────────────────────────────────────────────
 
