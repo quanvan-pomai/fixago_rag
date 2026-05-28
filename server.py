@@ -3,47 +3,39 @@
 server.py
 ---------
 Flask entry point for the Fixago RAG server.
-
-Responsibilities:
-  - HTTP routes (ingest, retrieve, query)
-  - Session management (load / save via PomaiCache)
-  - Orchestration: decide which path to take (booking / tool / LLM)
-  - Prompt building + response caching
-
-All business logic lives in dedicated modules:
-  booking/extractor.py   — extract & merge booking fields from text
-  booking/handler.py     — booking flow, create_booking execution
-  tools/handlers.py      — get_groups, get_services, get_promotions
-  llm_client/client.py   — LLM calls (plain, tool-calling, summarize)
-  db/                    — vector store + cache (via rag_engine facade)
+All business logic lives in core/ and dedicated modules:
+  core/session.py          — session management
+  core/prompt_builder.py   — system prompt, few-shot, history
+  core/guardrails.py       — injection detection, static fallbacks
+  core/intent_router.py    — tool intent detection
+  core/rag_enrichment.py   — query rewriting for RAG
+  core/output_validator.py — LLM output validation
+  core/query_processor.py  — multi-question splitting, tool data fetching
+  core/orchestrator.py     — orchestration paths + session persistence
+  booking/                 — booking flow
+  tools/handlers.py        — backend API fetch/format
+  llm_client/client.py     — LLM calls
+  db/                      — vector store + cache
 """
 import hashlib
-import json
 import os
-import re
 import uuid
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_file
 
 import rag_engine
-from booking.extractor import detect_confirmation, detect_negation, merge_booking_info
-from booking.handler import (
-    build_booking_response,
-    handle_create_booking,
-    normalize_service_search,
-    repair_booking_tool_call,
+from core.guardrails import guardrail_response, is_prompt_injection
+from core.intent_router import detect_tool_intent
+from core.orchestrator import (
+    persist_session, run_legacy_fast_path,
+    run_legacy_tool_path, run_native_tool_path,
 )
-from llm_client.client import (
-    llm_chat,
-    llm_chat_with_tools,
-    llm_summarize,
-    load_grammar,
-)
+from core.prompt_builder import build_system_prompt, compact_history, load_system_prompt
+from core.rag_enrichment import rewrite_for_rag
+from core.session import SessionManager
 from tools.handlers import (
-    handle_get_groups, handle_get_promotions, handle_get_services,
-    fetch_raw_groups, fetch_raw_services, fetch_raw_promotions,
-    format_groups_for_llm, format_services_for_llm, format_promotions_for_llm,
+    fetch_raw_groups, format_groups_for_llm,
     init_cache as _init_tools_cache,
 )
 
@@ -52,1164 +44,10 @@ load_dotenv()
 # Inject shared cache into tools so API responses are cached automatically
 _init_tools_cache(rag_engine.cache)
 
-# ── Feature flags ─────────────────────────────────────────────────────────────
 # Set ENABLE_NATIVE_TOOL_CALL=1 when cheese-server is started with --jinja.
 ENABLE_NATIVE_TOOL_CALL = os.environ.get("ENABLE_NATIVE_TOOL_CALL", "0") in ("1", "true", "yes")
 
 app = Flask(__name__)
-
-
-# ── Session management ────────────────────────────────────────────────────────
-
-class SessionManager:
-    _TTL_MS = 7_200_000  # 2 hours
-
-    @staticmethod
-    def get(session_id: str) -> dict:
-        if not session_id:
-            return {"history": [], "booking_state": {}}
-        try:
-            val = rag_engine.cache.get(f"session:{session_id}")
-            if val:
-                return json.loads(val.decode("utf-8"))
-        except Exception as exc:
-            print(f"Session load failed: {exc}")
-        return {"history": [], "booking_state": {}}
-
-    @staticmethod
-    def save(session_id: str, data: dict):
-        if not session_id:
-            return
-        try:
-            rag_engine.cache.set(
-                f"session:{session_id}",
-                json.dumps(data).encode("utf-8"),
-                ttl_ms=SessionManager._TTL_MS,
-            )
-        except Exception as exc:
-            print(f"Session save failed: {exc}")
-
-
-# ── Prompt helpers ────────────────────────────────────────────────────────────
-
-def _load_system_prompt() -> str:
-    try:
-        with open("system_prompt.txt", "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception:
-        return "Bạn là Trợ lý AI của Fixago. Luôn trả lời bằng tiếng Việt, lịch sự, ngắn gọn và hữu ích."
-
-
-# ── Dynamic few-shot injection ────────────────────────────────────────────────
-# Intent-specific Q&A examples — only 2-3 relevant shots are injected per call.
-# Small models are confused by too many examples; selecting per-intent dramatically
-# reduces system prompt size while keeping the model on-track.
-
-_INTENT_SHOTS: dict[str | None, list[str]] = {
-    "get_groups": [
-        "Q: Fixago có dịch vụ gì?\nA: CALL_TOOL: get_groups()",
-        "Q: Bên bạn làm được gì?\nA: CALL_TOOL: get_groups()",
-    ],
-    "get_promotions": [
-        "Q: Có khuyến mãi gì không?\nA: CALL_TOOL: get_promotions()",
-        "Q: Có mã giảm giá không?\nA: CALL_TOOL: get_promotions()",
-    ],
-    "get_services_nước": [
-        "Q: Sửa ống nước giá bao nhiêu?\nA: CALL_TOOL: get_services(search=\"nước\")",
-        "Q: Nước rỉ dưới bồn rửa sửa bao nhiêu?\nA: CALL_TOOL: get_services(search=\"nước\")",
-    ],
-    "get_services_điện": [
-        "Q: Sửa chập điện bao nhiêu?\nA: CALL_TOOL: get_services(search=\"điện\")",
-        "Q: Điện hay nhảy cầu dao, chi phí thế nào?\nA: CALL_TOOL: get_services(search=\"điện\")",
-    ],
-    "get_services_máy lạnh": [
-        "Q: Điều hòa không mát giá bao nhiêu?\nA: CALL_TOOL: get_services(search=\"máy lạnh\")",
-        "Q: Máy lạnh nhỏ giọt nước thì sửa bao nhiêu?\nA: CALL_TOOL: get_services(search=\"máy lạnh\")",
-    ],
-    "get_services_xây dựng": [
-        "Q: Chống thấm tường giá bao nhiêu?\nA: CALL_TOOL: get_services(search=\"xây dựng\")",
-    ],
-    "get_services_thạch cao": [
-        "Q: Làm trần thạch cao giá bao nhiêu?\nA: CALL_TOOL: get_services(search=\"thạch cao\")",
-    ],
-    "booking": [
-        "Q: Tôi muốn đặt thợ sửa điện\nA: Dạ mình hỗ trợ bạn đặt lịch được ạ. Bạn cho mình xin họ tên, số điện thoại và địa chỉ cần sửa nhé.",
-        "Q: ok đặt đi\nA: CALL_TOOL: create_booking(name=\"...\", phone=\"...\", address=\"...\", description=\"...\")",
-    ],
-    None: [
-        "Q: Fixago có dịch vụ gì?\nA: CALL_TOOL: get_groups()",
-        "Q: Tôi muốn đặt thợ\nA: Dạ mình hỗ trợ bạn đặt lịch được ạ. Bạn cho mình xin họ tên, số điện thoại và địa chỉ cần sửa nhé.",
-    ],
-}
-
-
-def _select_few_shots(intent: str | None) -> str:
-    """Return 2-3 Q&A examples matched to the detected intent."""
-    if intent is None:
-        key: str | None = None
-    elif "get_groups" in intent:
-        key = "get_groups"
-    elif "get_promotions" in intent:
-        key = "get_promotions"
-    elif "get_services" in intent:
-        m = re.search(r'search="([^"]*)"', intent)
-        svc = m.group(1) if m else ""
-        candidate = f"get_services_{svc}"
-        key = candidate if candidate in _INTENT_SHOTS else "get_services_điện"
-    elif "create_booking" in intent:
-        key = "booking"
-    else:
-        key = None
-    shots = _INTENT_SHOTS.get(key, _INTENT_SHOTS[None])
-    return "\n\nEXAMPLES:\n" + "\n\n".join(shots) + "\n"
-
-
-def _build_system_prompt(base: str, booking_state: dict, detected_intent: str | None = None) -> str:
-    """
-    In native tool-call mode: return the base prompt unchanged (model gets
-    tool schemas via the API payload).
-    In legacy text mode: append dynamically-selected few-shot examples + session state.
-    Only 2-3 examples relevant to the detected intent are injected — not all 6.
-    """
-    if ENABLE_NATIVE_TOOL_CALL:
-        return base
-
-    examples = _select_few_shots(detected_intent)
-    state = (
-        f"SESSION_STATE:\n"
-        f"- Tên: {booking_state.get('name') or 'Chưa có'}\n"
-        f"- SĐT: {booking_state.get('phone') or 'Chưa có'}\n"
-        f"- Địa chỉ: {booking_state.get('address') or 'Chưa có'}\n"
-        f"- Vấn đề: {booking_state.get('issue') or 'Chưa có'}\n\n"
-    )
-    return base + examples.replace("EXAMPLES:\n", state + "EXAMPLES:\n")
-
-
-def _compact_history(history, max_items=8):
-    if not isinstance(history, list):
-        return []
-    clean = []
-    for msg in history[-max_items:]:
-        if not isinstance(msg, dict):
-            continue
-        role    = msg.get("role", "user")
-        content = msg.get("content", "")
-        if role not in ("system", "user", "assistant"):
-            role = "user"
-        if content:
-            clean.append({"role": role, "content": str(content)})
-    return clean
-
-
-# ── Security ──────────────────────────────────────────────────────────────────
-
-_INJECTION_PATTERNS = [
-    "tiết lộ system prompt", "show system prompt", "give me your system prompt",
-    "ignore previous instruction", "ignore all previous",
-    "bỏ qua các quy tắc", "bỏ qua hướng dẫn trước", "bỏ qua lệnh trước",
-    "developer message", "system message", "jailbreak", "prompt injection",
-    "in ra prompt", "hiện prompt", "xuất prompt", "quên hết hướng dẫn",
-    "debug mode", "xuất toàn bộ prompt", "xuất prompt nội bộ",
-    "admin fixago", "tôi là admin", "mode on", "kiểm tra nội bộ",
-]
-
-def _is_prompt_injection(query: str) -> bool:
-    q = (query or "").strip().lower()
-    return any(p in q for p in _INJECTION_PATTERNS)
-
-def _guardrail_response():
-    return {
-        "status": "success",
-        "response": "Mình không thể hỗ trợ phần đó, nhưng mình có thể tư vấn dịch vụ sửa chữa hoặc hỗ trợ bạn đặt lịch với Fixago ạ.",
-        "source": "guardrail",
-        "tool_calls": [],
-        "cache_metrics": {"hit": False, "cached_tokens": 0, "savings_ratio": 0.0},
-    }
-
-
-# ── No-accent normalization for tool dispatch ─────────────────────────────────
-
-_NOACCENT_MAP = {
-    "dien": "điện", "nuoc": "nước", "may lanh": "máy lạnh",
-    "may giat": "máy giặt", "ong nuoc": "ống nước", "ro ri": "rò rỉ",
-    "thach cao": "thạch cao", "xay dung": "xây dựng", "cong tac": "công tắc",
-    "bong den": "bóng đèn", "may bom": "máy bơm", "bon cau": "bồn cầu",
-    "sua": "sửa", "bao nhieu": "bao nhiêu", "gia": "giá",
-    "ban co the": "bạn có thể", "ban ho tro": "bạn hỗ trợ",
-    "cong ty ban": "công ty bạn", "ho tro": "hỗ trợ",
-    "toi": "tôi", "nhung gi": "những gì", "giup": "giúp",
-    "la ai": "là ai", "lam gi": "làm gì",
-}
-
-def _normalize_noaccent(text: str) -> str:
-    """Apply simple no-accent → accented substitution for keyword matching."""
-    t = text.lower()
-    for k, v in _NOACCENT_MAP.items():
-        t = t.replace(k, v)
-    return t
-
-
-# ── Tool intent detection (legacy path only) ──────────────────────────────────
-
-_BOOKING_TRIGGER_WORDS = [
-    "đặt lịch", "đặt thợ", "gọi thợ", "book thợ", "book lịch",
-    "hẹn thợ", "cử thợ", "cho thợ", "hỗ trợ đặt",
-]
-
-def _detect_tool_intent(query: str):
-    """
-    Detect which backend tool to call for a given query.
-    Stronger pattern matching: covers symptom descriptions, no-accent,
-    mixed Viet-English, and context-aware intent (not just price keywords).
-    """
-    raw = (query or "").strip()
-    q   = _normalize_noaccent(raw.lower())
-
-    # If pure booking trigger (no price/service sub-question), let booking handler take it
-    is_booking_trigger = any(k in q for k in _BOOKING_TRIGGER_WORDS)
-    if is_booking_trigger and not any(k in q for k in [
-        "giá", "bao nhiêu", "how much", "price", "cost", "chi phí", "phí",
-    ]):
-        return None
-
-    # ── Promotion ────────────────────────────────────────────────────────────
-    if any(k in q for k in [
-        "khuyến mãi", "giảm giá", "ưu đãi", "voucher", "mã giảm", "coupon",
-        "discount", "promotion", "mã khuyến", "giảm %",
-        "khuyen mai", "giam gia", "uu dai",
-    ]):
-        return "CALL_TOOL: get_promotions()"
-
-    # ── Generic price query (no specific service mentioned) ───────────────────
-    # e.g. "giá cả thế nào", "bảng giá", "chi phí ra sao", "giá dịch vụ"
-    _GENERIC_PRICE = [
-        "giá cả", "bảng giá", "giá dịch vụ",
-        "chi phí dịch vụ", "giá các dịch vụ", "dịch vụ giá",
-        "các loại giá", "giá chung", "mức giá",
-        "price list", "service price", "how much for",
-    ]
-    _GENERIC_PRICE_NOACCENT = [
-        "gia ca", "bang gia", "gia dich vu", "chi phi dich vu",
-        "gia cac dich vu", "muc gia", "bao gia",
-    ]
-    _raw_lower = raw.lower()
-    if any(k in q for k in _GENERIC_PRICE) or any(k in _raw_lower for k in _GENERIC_PRICE_NOACCENT):
-        return "CALL_TOOL: get_services(search=\"all\")"
-
-    # ── Service groups (what does Fixago offer) ───────────────────────────────
-    _GROUP_PATTERNS = [
-        # VI accented
-        "dịch vụ gì", "có dịch vụ", "những dịch vụ", "nhóm dịch vụ",
-        "fixago làm gì", "bên bạn làm gì", "có sửa gì", "hỗ trợ gì",
-        "cung cấp gì", "bao gồm gì", "loại dịch vụ", "hạng mục gì",
-        "cung cấp những", "sửa được gì", "làm được gì", "hỗ trợ những gì",
-        "cung cấp dịch vụ", "dịch vụ nào", "hạng mục nào", "sửa gì",
-        "bên bạn có gì", "fixago có gì", "có những gì",
-        # VI no-accent (raw, before normalize)
-        "dich vu gi", "co dich vu", "nhung dich vu", "nhom dich vu",
-        "fixago lam gi", "co sua gi", "ho tro gi", "cung cap gi",
-        "hang muc gi", "lam duoc gi", "sua duoc gi",
-        # EN
-        "what service", "what can you", "what do you offer", "what does fixago",
-        "services do you", "services available", "what kind of", "what types",
-        "what repairs", "do you fix", "can you fix", "what do you fix",
-        "what can fixago",
-    ]
-    if any(k in q for k in _GROUP_PATTERNS):
-        return "CALL_TOOL: get_groups()"
-
-    # ── Service-specific detection ────────────────────────────────────────────
-    # IMPORTANT: order matters — more specific patterns checked first.
-    # "máy lạnh nhỏ giọt nước" must match máy lạnh, not nước.
-    # "tường bị thấm nước" must match xây dựng, not nước.
-    # Strategy: check equipment/appliance context first, THEN generic water/electric keywords.
-
-    # Priority map: check these first before generic keywords
-    # Priority patterns: resolve ambiguous cases before generic keyword matching.
-    # Uses regex to handle "tường bị thấm", "tường nhà bị thấm" etc.
-    _PRIORITY_CHECKS = [
-        # máy lạnh wins over generic "nước" keyword
-        ("máy lạnh", None, [
-            "máy lạnh", "điều hòa", "điều hoà", "tủ lạnh", "tủ đông",
-            "air conditioner", "aircon", "air con", "ac unit",
-            "refrigerator", "fridge", "freezer",
-        ]),
-        # xây dựng structural water wins over generic "nước"
-        ("xây dựng", [
-            r'tường.{0,10}thấm', r'nhà.{0,10}thấm', r'mái.{0,10}dột',
-            r'tường.{0,10}nứt', r'nứt.{0,10}tường',
-        ], [
-            "thấm dột", "dột nhà", "nhà bị dột",
-            "bong sơn", "sơn bị bong", "ẩm mốc",
-            "chống dột", "chống thấm", "xử lý thấm",
-        ]),
-        # Plumbing pump/pipe specific
-        ("nước", None, [
-            "bơm nước", "máy bơm", "bơm không lên",
-            "ống nước bị", "vòi nước bị", "bồn cầu bị",
-        ]),
-    ]
-
-    for svc_key, regex_pats, literal_pats in _PRIORITY_CHECKS:
-        if literal_pats and any(p in q for p in literal_pats):
-            return f'CALL_TOOL: get_services(search="{svc_key}")'
-        if regex_pats and any(re.search(p, q) for p in regex_pats):
-            return f'CALL_TOOL: get_services(search="{svc_key}")'
-
-    # Full service map (checked after priority patterns)
-    service_map = {
-        "điện": [
-            "điện", "ổ cắm", "bóng đèn", "công tắc", "tủ điện", "aptomat",
-            "dây điện", "bảng điện", "trạm sạc", "năng lượng mặt trời", "solar",
-            "đèn điện", "quạt điện",
-            "chập điện", "cháy điện", "tóe lửa", "hở điện",
-            "mất điện", "điện yếu", "nhảy cầu dao", "giật điện", "cúp điện",
-            "electrical", "electric", "wire", "circuit", "breaker",
-            "socket", "outlet", "switch", "fuse", "wiring",
-        ],
-        "nước": [
-            "nước",  # standalone — catches "nước chảy yếu", "nước bị rò"...
-            "ống nước", "ống thoát", "vòi nước", "bồn cầu", "lavabo",
-            "bồn tắm", "máy bơm", "van nước", "đường ống", "bể nước",
-            "rò rỉ", "rò nước", "nghẹt ống", "tắc ống", "tắc bồn cầu",
-            "vỡ ống", "bể ống", "ngập nước", "thoát chậm", "không thoát",
-            "nước không chảy", "nước yếu", "bơm không lên",
-            "pipe", "plumb", "leak", "drain", "clog", "sewage",
-            "toilet", "faucet", "tap", "shower", "sink", "pump",
-        ],
-        "máy lạnh": [
-            "máy lạnh", "điều hòa", "điều hoà", "tủ lạnh", "tủ đông",
-            "điện lạnh", "máy giặt",
-            "nạp gas", "bơm gas", "hết gas", "không lạnh", "không mát",
-            "mát yếu", "lạnh yếu", "vệ sinh máy lạnh", "bảo dưỡng máy lạnh",
-            "máy giặt không quay", "máy giặt kêu",
-            "air conditioner", "aircon", "air con", "ac ",
-            "refrigerator", "fridge", "freezer", "washing machine",
-            "washer", "dryer",
-            # EN symptom
-            "not cold", "not cooling", "ac not", "aircon not",
-        ],
-        "xây dựng": [
-            "sơn nhà", "sơn lại", "sơn tường", "sơn trần",
-            "chống thấm", "ốp lát", "gạch men", "gạch nền",
-            "tường", "ban công", "xây dựng", "cải tạo nhà",
-            "trát vữa", "bê tông", "nền nhà",
-            "paint", "waterproof", "tile", "cement",
-            "renovation", "remodel", "construction", "wall", "crack",
-        ],
-        "thạch cao": [
-            "thạch cao", "trần thạch cao", "vách ngăn", "trần nhà",
-            "vách thạch cao", "làm trần",
-            "plasterboard", "gypsum", "drywall", "ceiling board",
-            "false ceiling", "partition", "ceiling",
-        ],
-    }
-
-    # No-accent service name fallbacks (check against raw un-normalized query)
-    _NOACCENT_SERVICE = {
-        "dien":        "điện",
-        "nuoc":        "nước",
-        "may lanh":    "máy lạnh",
-        "may giat":    "máy lạnh",
-        "xay dung":    "xây dựng",
-        "thach cao":   "thạch cao",
-        "son tuong":   "xây dựng",
-        "chong tham":  "xây dựng",
-        "ong nuoc":    "nước",
-        "bon cau":     "nước",
-    }
-    raw_lower = raw.lower()
-    for noaccent_key, svc in _NOACCENT_SERVICE.items():
-        if noaccent_key in raw_lower:
-            return f'CALL_TOOL: get_services(search="{svc}")'
-
-    # Group list — no-accent patterns not caught by normalize
-    _GROUP_NOACCENT = ["co sua gi", "lam gi", "ho tro gi", "dich vu gi", "cung cap gi",
-                       "hang muc gi", "co the sua gi", "sua duoc gi"]
-    if any(k in raw_lower for k in _GROUP_NOACCENT):
-        return "CALL_TOOL: get_groups()"
-
-    # Intent signals: any symptom description, question, or repair verb counts
-    _INTENT_SIGNALS = [
-        "giá", "bao nhiêu", "chi phí", "phí", "báo giá",
-        "how much", "price", "cost", "fee",
-        "sửa", "lắp", "thay", "bảo dưỡng", "vệ sinh", "kiểm tra",
-        "khắc phục", "xử lý", "làm lại", "cần sửa",
-        "repair", "fix", "install", "replace", "service", "clean", "check",
-        "bị", "hỏng", "lỗi", "hư", "không", "tắc", "vỡ", "rò",
-        "thấm", "dột", "kêu", "nhảy", "hay bị", "thường bị", "đang bị",
-        "yếu quá", "yếu lắm", "quá yếu", "chảy yếu", "lạnh yếu",
-        "chậm quá", "quá chậm", "không đủ", "không ổn",
-        "tư vấn", "nên làm", "phải làm", "cần làm", "làm thế nào",
-        "nguy hiểm không", "có sao không",
-        "broken", "not working", "damaged", "leaking", "clogged", "weak",
-    ]
-
-    has_intent = any(s in q for s in _INTENT_SIGNALS)
-
-    # Symptom-context patterns: service keyword + descriptive word = intent
-    _SYMPTOM_CONTEXT = [
-        r'(máy lạnh|điều hòa|tủ lạnh)\s+\S',
-        r'(ống nước|bồn cầu|vòi nước|lavabo)\s+\S',
-        r'(điện|đèn|ổ cắm)\s+(bị|hay|không|yếu)',
-        r'(tường|mái|trần)\s+(bị|thấm|dột|nứt)',
-        r'(air con|aircon|ac)\s+(not|broken|leak)',
-    ]
-    if not has_intent:
-        for pat in _SYMPTOM_CONTEXT:
-            if re.search(pat, q):
-                has_intent = True
-                break
-
-    if has_intent:
-        for key, kws in service_map.items():
-            if any(kw in q for kw in kws):
-                return f'CALL_TOOL: get_services(search="{key}")'
-
-    # Short single-service clarification (e.g. "Điện", "Nước", "Máy lạnh")
-    if len(q.split()) <= 3:
-        for key, kws in service_map.items():
-            if any(kw == q.strip() or q.strip().startswith(kw) for kw in kws):
-                return f'CALL_TOOL: get_services(search="{key}")'
-
-    return None
-
-
-# ── Intent token matcher (fuzzy, accent-tolerant) ────────────────────────────
-
-def _has_tokens(text: str, *token_groups) -> bool:
-    """
-    Returns True if the text contains at least one token from EVERY group.
-    Each group is a list of synonymous keywords (OR within group, AND across groups).
-    Accent-insensitive: checks both raw and normalized text.
-
-    Example:
-        _has_tokens(q, ["giờ","thời gian","schedule"], ["làm việc","hoạt động","open"])
-        → True if text has (giờ OR thời gian OR schedule) AND (làm việc OR hoạt động OR open)
-    """
-    t = text.lower()
-    # Also check unaccented form for no-accent inputs
-    t2 = _normalize_noaccent(t)
-    for group in token_groups:
-        if not any(k in t or k in t2 for k in group):
-            return False
-    return True
-
-
-# ── Static fallback (no LLM needed) ──────────────────────────────────────────
-
-def _static_fallback(query: str) -> str:
-    """
-    Only intercepts what the LLM truly cannot handle correctly:
-    - Pure contact data mid-booking (no question keywords)
-    - Safety-critical situations (fire/electrocution risk)
-    - Hard facts the model might hallucinate (working hours = 24/7)
-    - Off-topic guardrail
-
-    Everything else (intro, comparison, quality, policy...) → LLM with 3B model.
-    """
-    raw_q = (query or "").lower()
-    q = _normalize_noaccent(raw_q)
-
-    # Don't intercept pure contact data mid-booking
-    from booking.extractor import extract_booking_from_text as _ex_check
-    _contact = _ex_check(query)
-    _is_contact_reply = (
-        (_contact.get("phone") or _contact.get("name"))
-        and not any(kw in raw_q for kw in ["?", "bao nhiêu", "giá", "gì vậy", "là gì",
-                                            "tư vấn", "hỏi", "khuyến mãi", "dịch vụ",
-                                            "tên gì", "ở đâu", "như thế nào", "ra sao",
-                                            "giới thiệu", "là ai", "làm gì", "công ty"])
-    )
-    if _is_contact_reply:
-        return ""
-
-    _has_price_intent = any(k in q for k in ["bao nhiêu", "giá", "khuyến mãi", "ưu đãi", "how much", "price"])
-    _has_promo_intent = any(k in q for k in ["khuyến mãi", "ưu đãi", "giảm giá", "discount", "promotion"])
-
-    # ── Safety: dangerous situations — must not let LLM fumble these ─────────
-    if any(k in q for k in ["tóe lửa", "chạm điện", "rò gas", "mùi gas", "cháy nổ"]):
-        return (
-            "Dạ tình trạng này nguy hiểm — bạn ngắt nguồn điện/khóa van gas ngay nếu an toàn, "
-            "tránh tự sửa. Fixago có thể cử thợ đến kiểm tra. Bạn muốn đặt lịch không ạ?"
-        )
-
-    # ── Hard fact: working hours (model tends to say "tôi là AI không có lịch") ──
-    _HOURS_TOKENS = ["giờ làm", "thời gian làm", "thoi gian lam", "gio lam viec",
-                     "working hour", "lam viec may gio", "ban đêm", "ban dem",
-                     "cuối tuần", "cuoi tuan", "chủ nhật", "chu nhat",
-                     "ngày lễ", "ngay le", "24/7", "suốt ngày",
-                     "mấy giờ", "may gio", "giờ mở", "gio mo", "open"]
-    _hours_q = (
-        any(k in raw_q for k in _HOURS_TOKENS)
-        or _has_tokens(raw_q,
-            ["giờ", "thời gian", "thoi gian", "lúc nào", "luc nao"],
-            ["làm việc", "lam viec", "hoạt động", "hoat dong", "phục vụ", "phuc vu"])
-    )
-    if _hours_q:
-        # If query ALSO asks about services, promotions, or price → don't intercept here.
-        # Let _run_legacy_tool_path handle the combo (hours fact + tool data).
-        _has_other_topic = any(k in raw_q for k in [
-            "dịch vụ", "dich vu", "khuyến mãi", "khuyen mai", "promotion",
-            "giá", "gia", "bao nhiêu", "what service", "services",
-            "làm gì", "lam gi", "có gì", "co gi", "hỗ trợ gì",
-        ])
-        if _has_other_topic:
-            return ""   # pass through to tool path
-
-        return (
-            "Dạ Fixago hoạt động 24/7, kể cả cuối tuần và ngày lễ — "
-            "bạn đặt lịch bất kỳ lúc nào, thợ sẽ liên hệ xác nhận thời gian sớm nhất nhé."
-        )
-
-    # ── Off-topic guardrail ───────────────────────────────────────────────────
-    if any(k in q for k in ["nấu phở", "tình yêu", "love poem", "thơ tình", "bài thơ",
-                              "nấu ăn", "recipe", "cooking", "bóng đá", "football",
-                              "thời tiết", "weather", "tin tức", "news"]):
-        return (
-            "Dạ mình chỉ hỗ trợ dịch vụ sửa chữa nhà của Fixago thôi ạ 😊 "
-            "Bạn cần tư vấn điện, nước, máy lạnh hay xây dựng không?"
-        )
-
-    # Ambiguous "cái này" / "nhìn giúp" — can't price without details
-    if any(k in q for k in ["cái này", "nhìn giúp", "xem giúp", "xem cái này"]):
-        return (
-            "Dạ mình cần biết tình trạng cụ thể để tư vấn chi phí. "
-            "Bạn mô tả lỗi hoặc hạng mục cần sửa để mình tư vấn nhé?"
-        )
-
-    # Short ambiguous "Hỏng rồi" / general damage statement with no service mentioned
-    _DAMAGE_WORDS = ["hỏng rồi", "hỏng hết", "bị hỏng", "hư rồi", "hư hết"]
-    _SERVICE_WORDS = ["điện", "nước", "máy lạnh", "máy giặt", "ống", "vòi", "chập",
-                      "rò", "nghẹt", "thạch cao", "sơn", "xây"]
-    if any(k in q for k in _DAMAGE_WORDS) and not any(s in q for s in _SERVICE_WORDS):
-        return (
-            "Dạ bạn cho mình biết thiết bị hay hạng mục nào bị hỏng để mình tư vấn phù hợp nhé? "
-            "(ví dụ: điện, nước, máy lạnh, máy giặt...)"
-        )
-
-    # Single-word "Điện" response during a conversation where service is ambiguous
-    # (handled by routing to price tool if standalone in _detect_tool_intent)
-
-    # Electrical emergency — route to booking prompt
-    _ELECTRIC_NOISE = ["chập điện", "cháy điện", "điện bị", "hở điện"]
-    _has_booking_intent = any(k in q for k in ["đặt lịch", "gọi thợ", "đặt thợ", "book thợ", "hẹn thợ"])
-    if not _has_booking_intent and any(k in q for k in _ELECTRIC_NOISE):
-        return (
-            "Dạ tình trạng chập điện cần xử lý ngay. Fixago có thể cử thợ điện đến kiểm tra và sửa an toàn. "
-            "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
-        )
-
-    # Generic price question with no specific service — consistent template answer
-    # Matches: "giá bên bạn thế nào", "giá cả ra sao", "bao tiền vậy", "giá chung"
-    _GENERIC_PRICE_Q = [
-        "giá bên", "giá cả", "giá ra sao", "giá như thế", "giá thế nào",
-        "bảng giá", "giá chung", "giá dịch vụ", "giá của fixago",
-        "gia ca", "gia the nao", "gia dich vu",
-    ]
-    _has_service_word = any(s in q for s in [
-        "điện", "nước", "máy lạnh", "xây", "thạch cao", "ống", "vòi", "bồn",
-        "dien", "nuoc", "may lanh", "xay dung", "thach cao",
-    ])
-    if any(k in q for k in _GENERIC_PRICE_Q) and not _has_service_word:
-        return (
-            "Dạ giá của Fixago tùy theo hạng mục và tình trạng thực tế — "
-            "thợ sẽ báo rõ chi phí trước khi làm bạn nhé. "
-            "Bạn đang cần tư vấn dịch vụ nào ạ? (điện, nước, máy lạnh, xây dựng...)"
-        )
-
-    return ""
-
-
-# ── Orchestration ─────────────────────────────────────────────────────────────
-
-def _run_native_tool_path(query: str, history: list, messages: list, used_tools: list) -> str:
-    """Native function-calling path (cheese-server --jinja required)."""
-    booking_resp = build_booking_response(query, history)
-
-    if booking_resp and "CALL_TOOL: create_booking" in booking_resp:
-        return handle_create_booking(booking_resp, used_tools)
-
-    if booking_resp and "CALL_TOOL" not in booking_resp:
-        return booking_resp
-
-    tool_name, tool_result, raw_msg = llm_chat_with_tools(messages, temperature=0.0)
-
-    if tool_name == "get_groups":
-        messages.append({"role": "assistant", "content": None, "tool_calls": raw_msg.get("tool_calls")})
-        return handle_get_groups(messages, used_tools)
-
-    if tool_name == "get_services":
-        search = normalize_service_search(tool_result.get("search", ""))
-        messages.append({"role": "assistant", "content": None, "tool_calls": raw_msg.get("tool_calls")})
-        return handle_get_services(search, messages, used_tools)
-
-    if tool_name == "get_promotions":
-        messages.append({"role": "assistant", "content": None, "tool_calls": raw_msg.get("tool_calls")})
-        return handle_get_promotions(messages, used_tools)
-
-    if tool_name == "create_booking":
-        if detect_confirmation(query):
-            n, p, a, d = (
-                tool_result.get("name", ""),
-                tool_result.get("phone", ""),
-                tool_result.get("address", ""),
-                tool_result.get("description", ""),
-            )
-            fake = f'CALL_TOOL: create_booking(name="{n}", phone="{p}", address="{a}", description="{d}")'
-            return handle_create_booking(fake, used_tools)
-
-        # All fields present but not confirmed — show summary
-        info = merge_booking_info(query, history)
-        info.update({k: v for k, v in tool_result.items() if v})
-        return (
-            f"Tên: {info.get('name') or tool_result.get('name', '?')}\n"
-            f"SĐT: {info.get('phone') or tool_result.get('phone', '?')}\n"
-            f"Địa chỉ: {info.get('address') or tool_result.get('address', '?')}\n"
-            f"Vấn đề: {info.get('issue') or tool_result.get('description', '?')}\n"
-            "Bạn xác nhận đặt lịch với thông tin này nhé?"
-        )
-
-    # No tool call — plain text reply
-    return tool_result
-
-
-# Hours fact — a hardcoded answer segment injected when a sub-question asks about schedule
-_HOURS_FACT = "Fixago hoạt động 24/7, kể cả cuối tuần và ngày lễ."
-
-# Keywords that signal a sub-question is about working hours
-_HOURS_KEYWORDS = [
-    "giờ làm", "thời gian", "mấy giờ", "giờ mở", "làm việc",
-    "hoạt động", "cuối tuần", "chủ nhật", "ngày lễ", "ban đêm",
-    "lúc nào", "24/7", "working hour", "open", "schedule",
-    "gio lam", "thoi gian", "may gio", "gio mo", "cuoi tuan",
-]
-
-def _is_hours_question(text: str) -> bool:
-    """Return True if the text is primarily asking about working hours/schedule."""
-    t = text.lower()
-    return any(k in t for k in _HOURS_KEYWORDS)
-
-
-def _split_questions(query: str) -> list[str]:
-    """
-    Split a multi-question message into individual sub-questions.
-    Returns [query] unchanged if no split is needed.
-
-    Handles common Vietnamese/English patterns:
-      "Giá điện bao nhiêu? Còn nước thì sao? Có KM không?"
-      "Fixago làm gì, giá ra sao, có KM không"
-      "Dịch vụ gì và giờ làm việc thế nào?"
-      "Dịch vụ gì + có KM không + giờ làm việc"
-      "Fixago làm gì, có KM không, giờ mở cửa?"
-    """
-    raw = (query or "").strip()
-    if not raw:
-        return [raw]
-
-    # 1. Split on ? or ! followed by next sentence
-    parts = re.split(r'(?<=[?!])\s+(?=[A-ZÀ-Ỹa-zà-ỹ0-9])', raw)
-    if len(parts) >= 2 and all(p.strip() for p in parts):
-        return [p.strip() for p in parts]
-
-    # 2. Split on explicit transition words: "còn X thì", "ngoài ra", "thêm nữa"
-    parts = re.split(
-        r'[,;]\s*(?:còn|ngoài ra|thêm nữa|bên cạnh đó|đồng thời)\s+',
-        raw, flags=re.IGNORECASE
-    )
-    if len(parts) >= 2 and all(p.strip() for p in parts):
-        return [p.strip() for p in parts]
-
-    # 3. Split on " + " separator (informal listing)
-    if " + " in raw:
-        parts = [p.strip() for p in raw.split(" + ") if p.strip()]
-        if len(parts) >= 2:
-            return parts
-
-    # 4. Split on plain ", " or ";" when each part has a distinct signal
-    # Hours keywords are valid signals too (not just service/price)
-    _Q_SIGNALS = [
-        "giá", "bao nhiêu", "gì", "sao", "thế nào", "ra sao", "như thế",
-        "không", "có", "dịch vụ", "km", "khuyến mãi", "ưu đãi",
-        "sửa", "lắp", "kiểm tra", "hỏng", "bị", "lỗi", "hư",
-        "điện", "nước", "máy lạnh", "xây", "thạch cao",
-        "giờ", "thời gian", "mấy giờ", "làm việc", "hoạt động", "open",
-        "how much", "what", "when", "price", "service", "fix", "repair", "hour",
-    ]
-    for sep in [",", ";"]:
-        sep_parts = [p.strip() for p in raw.split(sep) if p.strip()]
-        if len(sep_parts) >= 2 and len(sep_parts) <= 5:
-            if all(any(s in p.lower() for s in _Q_SIGNALS) for p in sep_parts):
-                return sep_parts
-
-    # 5. Split on " và " when sides are clearly different topics
-    # Hours + anything else always qualifies as two topics
-    _SERVICE_SIGNALS = [
-        "điện", "nước", "máy lạnh", "xây", "thạch cao", "sơn", "ống",
-        "electric", "water", "pipe", "air con", "dịch vụ", "services",
-        "khuyến mãi", "promotion", "km",
-    ]
-    _QUESTION_SIGNALS = [
-        "giá", "bao nhiêu", "thế nào", "ra sao", "có không", "dịch vụ",
-        "how much", "what", "price",
-    ]
-    and_parts = re.split(r'\s+và\s+', raw, flags=re.IGNORECASE)
-    if len(and_parts) >= 2:
-        parts_lower = [p.lower() for p in and_parts]
-        # Always split if one side is hours and the other has a topic signal
-        has_hours_side  = any(_is_hours_question(p) for p in parts_lower)
-        has_topic_side  = any(any(s in p for s in _SERVICE_SIGNALS + _QUESTION_SIGNALS)
-                              for p in parts_lower)
-        if has_hours_side and has_topic_side:
-            return [p.strip() for p in and_parts]
-        # Also split if both sides have distinct service/question signals
-        a, b = parts_lower[0], parts_lower[-1]
-        if ((any(s in a for s in _SERVICE_SIGNALS) and any(s in b for s in _SERVICE_SIGNALS))
-                or (any(s in a for s in _QUESTION_SIGNALS) and any(s in b for s in _QUESTION_SIGNALS))):
-            return [p.strip() for p in and_parts]
-
-    return [raw]
-
-
-def _detect_multi_service(query: str, first_tool: str, messages: list, used_tools: list):
-    """
-    If the query mentions two+ different service categories with a clear separator,
-    fetch both raw data blocks and let LLM stitch a combined answer.
-    Otherwise return first_tool unchanged (to let normal path handle it).
-    """
-    q = _normalize_noaccent((query or "").lower())
-
-    # Quick check: must have at least one separator suggesting two topics
-    _MULTI_SEPARATORS = [
-        " còn ", " và giá ", " với giá ", " or ", " and price",
-        "bao nhiêu,", "bao nhiêu còn", "ngoài ra", "; ",
-        " + ", "cùng với",
-    ]
-    if not any(sep in q for sep in _MULTI_SEPARATORS):
-        return first_tool
-
-    service_map = {
-        "điện":      ["điện", "chập", "ổ cắm", "bóng đèn", "công tắc", "aptomat", "dây điện"],
-        "nước":      ["nước", "ống", "rò", "nghẹt", "vòi", "bồn cầu", "máy bơm", "lavabo"],
-        "máy lạnh":  ["máy lạnh", "điều hòa", "tủ lạnh", "không lạnh", "máy giặt", "điện lạnh"],
-        "xây dựng":  ["sơn", "chống thấm", "ốp lát", "tường", "ban công", "xây dựng", "dột"],
-        "thạch cao": ["thạch cao", "trần", "vách ngăn"],
-    }
-    matched = []
-    for key, kws in service_map.items():
-        if any(kw in q for kw in kws):
-            matched.append(key)
-
-    if len(matched) < 2:
-        return first_tool
-
-    # Fetch raw data for each matched service
-    data_blocks = []
-    for svc in matched[:2]:
-        tool_str = f'CALL_TOOL: get_services(search="{svc}")'
-        block = _fetch_tool_data_block(tool_str, used_tools)
-        if block:
-            data_blocks.append(block)
-
-    if not data_blocks:
-        return first_tool
-
-    combined = "\n\n---\n".join(data_blocks)
-    return _llm_with_injected_data(query, combined, messages)
-
-
-def _resolve_tool_data(sub_query: str, messages: list, used_tools: list) -> str:
-    """
-    For a single sub-question, fetch backend data if needed and return
-    a compact fact-block string to inject into the LLM prompt.
-    Returns "" if no tool needed.
-    """
-    tool = _detect_tool_intent(sub_query)
-    if not tool:
-        return ""
-    return _fetch_tool_data_block(tool, used_tools)
-
-
-def _fetch_tool_data_block(tool_str: str, used_tools: list) -> str:
-    """
-    Fetch raw backend data for a CALL_TOOL string and return a compact
-    fact-block string suitable for injecting into an LLM prompt.
-    Returns "" if no matching tool.
-    """
-    if "get_groups" in tool_str:
-        used_tools.append("Tool [Backend API]: GET /services/groups")
-        groups = fetch_raw_groups()
-        return format_groups_for_llm(groups)
-
-    if "get_promotions" in tool_str:
-        used_tools.append("Tool [Backend API]: GET /discounts/available")
-        promos = fetch_raw_promotions()
-        return format_promotions_for_llm(promos)
-
-    if "get_services" in tool_str:
-        m = re.search(r'search="([^"]*)"', tool_str)
-        search = normalize_service_search(m.group(1) if m else "")
-        used_tools.append(f'Tool [Backend API]: GET /services?search="{search}"')
-        services = fetch_raw_services(search)
-        return format_services_for_llm(services, search)
-
-    return ""
-
-
-def _detect_user_language(text: str) -> str:
-    """
-    Return 'en' if message is clearly English, else 'vi'.
-    Only used for a few hardcoded static responses (hours, groups).
-    All LLM-generated responses let the model handle language from the system prompt.
-    """
-    # If any accented Vietnamese character exists → definitely Vietnamese
-    if re.search(r'[àáâãèéêìíòóôõùúýăđơưạảấầẩẫậắằẳẵặẹẻẽếềểễệỉịọỏốồổỗộớờởỡợụủứừửữựỳỷỹỵ]', text, re.IGNORECASE):
-        return "vi"
-    # Only call English when clearly so — multiple unambiguous English words
-    en_hits = re.findall(
-        r'\b(what|how|can|does|price|service|fix|repair|help|install|replace|cost|'
-        r'check|please|water|electric|working|hours|schedule|services|available|offer)\b',
-        text.lower()
-    )
-    return "en" if len(set(en_hits)) >= 2 else "vi"
-
-
-def _is_price_question(query: str) -> bool:
-    """Return True if the query is primarily asking about price/cost (not reporting a symptom)."""
-    q = query.lower()
-    price_signals = [
-        "bao nhiêu", "bao nhieu", "bao tien", "bao tiền",
-        "giá", "gia ca", "gia bao", "chi phí", "chi phi",
-        "tốn", "ton bao", "ton khoang", "mất bao", "mat bao",
-        "phí", "phi", "tiền", "tien",
-        "how much", "price", "cost", "fee", "charge",
-        "khoảng bao", "khoang bao", "thường tốn", "thuong ton",
-        "trung bình", "trung binh", "estimate",
-    ]
-    return any(s in q for s in price_signals)
-
-
-# ── Query rewriting for RAG ───────────────────────────────────────────────────
-# Converts symptom descriptions into canonical repair phrases before RAG lookup.
-# e.g. "nước cứ rỉ dưới bồn rửa" → "nước rỉ dưới bồn rửa rò rỉ nước ống nước"
-# This improves RAG recall without touching the LLM.
-
-_SYMPTOM_REWRITES = [
-    (r'rỉ.{0,8}(nước|bồn|vòi|lavabo|ống)',            "rò rỉ nước ống nước"),
-    (r'(bồn cầu|toilet).{0,10}(nghẹt|tắc)',            "tắc nghẹt bồn cầu ống thoát"),
-    (r'nước.{0,6}(chảy yếu|yếu|không lên)',            "áp lực nước yếu ống nước"),
-    (r'(điện|cầu dao).{0,8}(nhảy|hay nhảy)',           "nhảy cầu dao aptomat sự cố điện"),
-    (r'(chập|tóe lửa|cháy|hở).{0,8}điện',             "chập điện sự cố điện"),
-    (r'(điều hòa|máy lạnh).{0,10}(không mát|lạnh yếu)', "máy lạnh không lạnh nạp gas"),
-    (r'(điều hòa|máy lạnh).{0,8}(nhỏ giọt|chảy nước)',  "máy lạnh nhỏ giọt tắc ống thoát"),
-    (r'tường.{0,10}(thấm|ẩm|mốc)',                    "thấm dột tường chống thấm"),
-    (r'(mái|nhà).{0,8}dột',                            "dột mái chống thấm"),
-    (r'(sơn|tường).{0,8}(bong|bong tróc|bạc màu)',     "sơn tường bong tróc sơn lại"),
-    # No-accent variants
-    (r'nuoc.{0,6}(ri|chay yeu)',                       "rò rỉ nước ống nước"),
-    (r'dien.{0,8}(nhay|chap)',                         "điện sự cố nhảy cầu dao"),
-    (r'may lanh.{0,10}(khong mat|khong lanh)',         "máy lạnh không lạnh"),
-]
-
-
-def _rewrite_for_rag(query: str, detected_intent: str | None) -> str:
-    """
-    Enrich the user query with canonical repair keywords before RAG retrieval.
-    Returns the enriched string (or original if no rewrite applies).
-    """
-    q = query.strip()
-
-    # Prepend service keyword extracted from detected intent
-    canonical_kw = ""
-    if detected_intent and "get_services" in detected_intent:
-        m = re.search(r'search="([^"]*)"', detected_intent)
-        if m:
-            canonical_kw = m.group(1)   # e.g. "nước", "điện", "máy lạnh"
-
-    # Apply first matching symptom rewrite
-    q_lower = q.lower()
-    for pattern, phrase in _SYMPTOM_REWRITES:
-        if re.search(pattern, q_lower):
-            if phrase not in q_lower:
-                q = q + " " + phrase
-            break
-
-    if canonical_kw and canonical_kw not in q.lower():
-        q = canonical_kw + " " + q
-
-    return q
-
-
-# ── Output validator ──────────────────────────────────────────────────────────
-# Catches LLM failures: ignorance phrases despite injected data, CALL_TOOL leaks,
-# prompt content leakage. Returns a replacement string or None (response is fine).
-
-_IGNORANCE_PHRASES = [
-    "chưa có thông tin", "không có thông tin", "không tìm thấy thông tin",
-    "chưa có dữ liệu", "không có dữ liệu", "tôi không biết",
-    "mình chưa có thông tin", "chưa tìm thấy",
-    "i don't know", "don't have information", "no information available",
-    "không thể cung cấp", "không có trong hệ thống",
-]
-_TOOL_LEAK_RE = re.compile(r'CALL_TOOL\s*:', re.IGNORECASE)
-_PROMPT_LEAK_PHRASES = [
-    "[DỮ LIỆU HỆ THỐNG", "SESSION_STATE:", "EXAMPLES:\nQ:", "system prompt",
-]
-
-
-def _validate_llm_output(response: str, data_block: str | None, query: str = "") -> str | None:
-    """
-    Validate LLM output quality.
-    Returns a replacement string if bad, None if OK.
-    """
-    r = (response or "").strip()
-
-    # CALL_TOOL leaked into conversational output
-    if _TOOL_LEAK_RE.search(r):
-        cleaned = _TOOL_LEAK_RE.sub("", r).strip()
-        if len(cleaned) > 20:
-            return cleaned
-        return "Dạ mình gặp sự cố xử lý. Bạn thử hỏi lại nhé ạ."
-
-    # Prompt internals leaked
-    if any(p in r for p in _PROMPT_LEAK_PHRASES):
-        return "Dạ mình gặp sự cố xử lý. Bạn thử hỏi lại nhé ạ."
-
-    # Wrong script — Cyrillic/Arabic/etc in response when query is Vietnamese or no-accent VI
-    # "Co uy tin khong?" → should never return Russian
-    _has_cyrillic = bool(re.search(r'[Ѐ-ӿ]', r))
-    _has_arabic   = bool(re.search(r'[؀-ۿ]', r))
-    _has_cjk      = bool(re.search(r'[一-鿿぀-ゟ゠-ヿ]', r))
-    if _has_cyrillic or _has_arabic or _has_cjk:
-        # Only flag if the query itself wasn't in that script
-        _query_has_cyrillic = bool(re.search(r'[Ѐ-ӿ]', query))
-        if not _query_has_cyrillic:
-            return "Dạ mình gặp sự cố xử lý. Bạn thử hỏi lại nhé ạ."
-
-    # Model claims no data when real data was injected
-    if data_block:
-        has_real_data = (
-            "VNĐ" in data_block
-            or "tham khảo" in data_block
-            or "dịch vụ" in data_block.lower()
-            or any(c.isdigit() for c in data_block)
-        )
-        if has_real_data and any(p in r.lower() for p in _IGNORANCE_PHRASES):
-            return (
-                "Dạ đây là thông tin Fixago có:\n\n"
-                + data_block.strip()
-                + "\n\nBạn cần hỗ trợ thêm không ạ?"
-            )
-
-    return None  # response is valid
-
-
-def _llm_with_injected_data(
-    query: str,
-    data_block: str,
-    messages: list,
-) -> str:
-    """
-    Inject backend data as a mandatory fact context using the system prompt's
-    [DỮ LIỆU HỆ THỐNG] format, then let the LLM answer naturally.
-    The LLM handles language (Vietnamese/English/mixed) from the system prompt rule.
-    Output is validated — if the model incorrectly claims no data, a fallback is returned.
-    """
-    instruction = (
-        f"[DỮ LIỆU HỆ THỐNG — chỉ dùng thông tin này để trả lời, không bịa thêm]\n"
-        f"{data_block}\n"
-        f"[/DỮ LIỆU]\n\n"
-        f"{query}"
-    )
-    llm_messages = messages[:-1] + [{"role": "user", "content": instruction}]
-    raw = llm_chat(llm_messages, temperature=0.1)
-    fix = _validate_llm_output(raw, data_block, query)
-    return fix if fix is not None else raw
-
-
-def _extract_clean_query(last_user_content: str) -> str:
-    """Strip RAG context prefix from the last user message to get the actual query."""
-    text = last_user_content or ""
-    # Strip injected RAG context block
-    if "Câu hỏi của khách:" in text:
-        return text.split("Câu hỏi của khách:")[-1].strip()
-    if "Ngữ cảnh tham khảo:" in text:
-        parts = text.split("\n\n")
-        return parts[-1].replace("Câu hỏi của khách:\n", "").strip()
-    # Strip any [DỮ LIỆU] block that was injected in a previous turn
-    if "[DỮ LIỆU HỆ THỐNG" in text:
-        if "Câu hỏi:" in text:
-            return text.split("Câu hỏi:")[-1].split("\n")[0].strip()
-        if "Khách hỏi:" in text:
-            return text.split("Khách hỏi:")[-1].split("\n")[0].strip()
-    return text.strip()
-
-
-def _execute_tool(tool_str: str, messages: list, used_tools: list) -> str:
-    """
-    Execute a CALL_TOOL string.
-
-    Routing strategy:
-      - get_groups      → fetch + inject into LLM (LLM handles language naturally)
-      - get_promotions  → deterministic formatter
-      - get_services    → fetch + inject data into LLM via _llm_with_injected_data()
-                          The system prompt + injected data guide the LLM to respond
-                          in the customer's language with the right tone.
-    """
-    # Extract clean query from last user message
-    last_user = ""
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            last_user = msg.get("content", "")
-            break
-    query = _extract_clean_query(last_user)
-
-    # ── get_groups ────────────────────────────────────────────────────────────
-    if "get_groups" in tool_str:
-        used_tools.append("Tool [Backend API]: GET /services/groups")
-        groups = fetch_raw_groups()
-        if groups:
-            data_block = format_groups_for_llm(groups)
-            return _llm_with_injected_data(query, data_block, messages)
-        return handle_get_groups(messages, used_tools)
-
-    # ── get_promotions ────────────────────────────────────────────────────────
-    if "get_promotions" in tool_str:
-        return handle_get_promotions(messages, used_tools)
-
-    # ── get_services ──────────────────────────────────────────────────────────
-    if "get_services" in tool_str:
-        m2 = re.search(r'search="([^"]*)"', tool_str)
-        search = normalize_service_search(m2.group(1) if m2 else "")
-        used_tools.append(f'Tool [Backend API]: GET /services?search="{search}"')
-        services = fetch_raw_services(search)
-
-        if services:
-            data_block = format_services_for_llm(services, search)
-            return _llm_with_injected_data(query, data_block, messages)
-
-        return handle_get_services(search, messages, used_tools)
-
-    return ""
-
-
-def _run_legacy_tool_path(query: str, history: list, messages: list, used_tools: list) -> str:
-    """
-    Main orchestration path.
-
-    Flow:
-      1. Static guardrails (safety / hours / off-topic) → instant return
-      2. Booking confirmation / mid-flow → deterministic booking handler
-      3. Multi-service (two APIs needed) → stitch + return
-      4. Split multi-question → fetch each tool's data, inject all into one LLM call
-      5. Single tool → fetch data, inject as context, LLM summarizes naturally
-      6. No tool → pure LLM with RAG context
-    """
-    # 1. Static guardrails
-    static_early = _static_fallback(query)
-    if static_early:
-        return static_early
-
-    # 2. Booking flow — fully deterministic
-    _hint_tool = _detect_tool_intent(query)
-    _has_service_hint = _hint_tool and "get_services" in str(_hint_tool)
-    if not detect_negation(query) and not _has_service_hint:
-        booking_resp = build_booking_response(query, history)
-        if booking_resp:
-            booking_resp = repair_booking_tool_call(booking_resp, query, history)
-            if "create_booking" in booking_resp.lower():
-                return handle_create_booking(booking_resp, used_tools)
-            return booking_resp  # asking for info or showing summary
-
-    # 3. Multi-service shortcut
-    multi_result = _detect_multi_service(query, _hint_tool, messages, used_tools)
-    if multi_result and multi_result != _hint_tool:
-        return multi_result
-
-    # 4. Single tool detected — but check if query also asks about hours (combo case)
-    if _hint_tool and _hint_tool.startswith("CALL_TOOL:"):
-        if _is_hours_question(query):
-            # Combo: tool data + hours fact → one LLM call with all data
-            tool_data = _fetch_tool_data_block(_hint_tool, used_tools)
-            combo_blocks = [b for b in [tool_data, _HOURS_FACT] if b]
-            if combo_blocks:
-                combined = "\n\n---\n".join(combo_blocks)
-                return _llm_with_injected_data(query, combined, messages)
-        return _execute_tool(_hint_tool, messages, used_tools)
-
-    # 5. Multi-question: split, handle each part, collect all data blocks
-    sub_questions = _split_questions(query)
-    if len(sub_questions) > 1:
-        data_blocks: list[str] = []   # all data to inject into one LLM call
-        hours_fact  = False
-
-        for sub_q in sub_questions:
-            if _is_hours_question(sub_q):
-                hours_fact = True
-                continue
-            tool = _detect_tool_intent(sub_q)
-            if not tool:
-                continue
-            block = _fetch_tool_data_block(tool, used_tools)
-            if block:
-                data_blocks.append(block)
-
-        if hours_fact:
-            data_blocks.append(_HOURS_FACT)
-
-        if data_blocks:
-            combined = "\n\n---\n".join(data_blocks)
-            enriched = (
-                f"[DỮ LIỆU HỆ THỐNG — chỉ dùng thông tin này để trả lời, không bịa thêm]\n"
-                f"{combined}\n"
-                f"[/DỮ LIỆU]\n\n"
-                f"{query}"
-            )
-            llm_messages = messages[:-1] + [{"role": "user", "content": enriched}]
-            return llm_chat(llm_messages, temperature=0.1)
-
-    # 6. Pure LLM — conversational (comparison, intro, quality, off-topic within scope)
-    raw = llm_chat(messages, temperature=0.2)
-    fix = _validate_llm_output(raw, None, query)
-    return fix if fix is not None else raw
-
-
-def _run_legacy_fast_path(query: str, history: list, messages: list, used_tools: list):
-    """
-    Pre-RAG fast path: handle static + booking + deterministic tools without
-    calling the LLM. Returns None to signal the main path should continue.
-    """
-    # Static guardrails
-    static_early = _static_fallback(query)
-    if static_early:
-        return static_early
-
-    # Booking — fully deterministic, no LLM needed
-    _hint_tool = _detect_tool_intent(query)
-    _has_service_hint = _hint_tool and "get_services" in str(_hint_tool)
-    if not detect_negation(query) and not _has_service_hint:
-        booking_resp = build_booking_response(query, history)
-        if booking_resp:
-            booking_resp = repair_booking_tool_call(booking_resp, query, history)
-            if "create_booking" in booking_resp.lower():
-                return handle_create_booking(booking_resp, used_tools)
-            return booking_resp
-
-    # Multi-service stitched response
-    multi_result = _detect_multi_service(query, _hint_tool, messages, used_tools)
-    if multi_result and multi_result != _hint_tool:
-        return multi_result
-
-    # Everything else needs the LLM — signal to continue
-    return None
-
-
-def _persist_session(session_id: str, session: dict, query: str, answer: str):
-    session["history"].append({"role": "user",      "content": query})
-    session["history"].append({"role": "assistant", "content": answer})
-    session["history"]       = _compact_history(session["history"], max_items=8)
-    session["booking_state"] = merge_booking_info(query, session["history"])
-    SessionManager.save(session_id, session)
 
 
 # ── Flask routes ──────────────────────────────────────────────────────────────
@@ -1249,44 +87,56 @@ def retrieve():
 
 @app.route("/api/v1/rag/query", methods=["POST"])
 def query_rag():
-    data      = request.json or {}
-    query     = data.get("query")
-    use_cache = data.get("use_cache", False)
+    data       = request.json or {}
+    query      = data.get("query")
+    use_cache  = data.get("use_cache", False)
     session_id = data.get("session_id")
 
     if not query:
         return jsonify({"status": "error", "message": "Missing 'query'"}), 400
 
-    if _is_prompt_injection(query):
-        return jsonify(_guardrail_response())
+    if is_prompt_injection(query):
+        return jsonify(guardrail_response())
 
     try:
         # ── Session ──────────────────────────────────────────────────────────
         if not session_id:
             session_id = str(uuid.uuid4())
 
-        session   = SessionManager.get(session_id)
-        client_h  = _compact_history(data.get("history", []))
+        session  = SessionManager.get(session_id)
+        client_h = compact_history(data.get("history", []))
         if client_h and not session.get("history"):
             session["history"] = client_h
-        history   = session.get("history", [])
+        history = session.get("history", [])
+
+        # ── Prefetch service catalog once per session ─────────────────────────
+        if not session.get("catalog_prefetched"):
+            try:
+                _grps = fetch_raw_groups()
+                if _grps:
+                    session["catalog_summary"] = format_groups_for_llm(_grps)
+                    session["catalog_prefetched"] = True
+            except Exception:
+                pass
 
         # ── System prompt ─────────────────────────────────────────────────────
-        base_prompt   = data.get("system_prompt", _load_system_prompt())
-        _early_intent = _detect_tool_intent(query)
-        system        = _build_system_prompt(base_prompt, session.get("booking_state", {}), _early_intent)
+        base_prompt   = load_system_prompt()
+        _early_intent = detect_tool_intent(query)
+        _catalog      = session.get("catalog_summary", "")
+        system        = build_system_prompt(
+            base_prompt, session.get("booking_state", {}),
+            ENABLE_NATIVE_TOOL_CALL, _early_intent, _catalog,
+        )
 
         # ── Fast path ─────────────────────────────────────────────────────────
-        # Most production traffic is static policy, booking state, or backend
-        # tools. Handle that before RAG retrieval and before any model call.
         used_tools: list = []
         if not ENABLE_NATIVE_TOOL_CALL and not use_cache:
             fast_messages = [{"role": "system", "content": system}]
-            fast_messages.extend(_compact_history(history, max_items=6))
+            fast_messages.extend(compact_history(history, max_items=6))
             fast_messages.append({"role": "user", "content": query})
-            fast_answer = _run_legacy_fast_path(query, history, fast_messages, used_tools)
+            fast_answer = run_legacy_fast_path(query, history, fast_messages, used_tools)
             if fast_answer is not None:
-                _persist_session(session_id, session, query, fast_answer)
+                persist_session(session_id, session, query, fast_answer)
                 return jsonify({
                     "status": "success",
                     "response": fast_answer,
@@ -1296,14 +146,11 @@ def query_rag():
                 })
 
         # ── RAG context ───────────────────────────────────────────────────────
-        # Skip RAG when a service tool is detected — backend data will be injected
-        # directly by _execute_tool(), so RAG context would only add noise + latency.
-        # get_groups / get_promotions / None (conversational) still use RAG.
         rag_context = ""
         _skip_rag   = bool(_early_intent and "get_services" in _early_intent)
         if not _skip_rag:
             try:
-                _rewritten  = _rewrite_for_rag(query, _early_intent)
+                _rewritten  = rewrite_for_rag(query, _early_intent)
                 rag_context = rag_engine.retrieve_context(
                     rag_engine.normalize_query(_rewritten),
                     top_k=2,
@@ -1315,7 +162,7 @@ def query_rag():
         # ── Cache key ─────────────────────────────────────────────────────────
         history_text = "\n".join(
             f"{m.get('role')}: {m.get('content', '')}"
-            for m in _compact_history(history)
+            for m in compact_history(history)
         )
         cache_seed = f"System:{system}\nHistory:{history_text}\nContext:{rag_context}\nQ:{query}"
         tokens     = []
@@ -1342,7 +189,7 @@ def query_rag():
 
         # ── Build messages ────────────────────────────────────────────────────
         messages = [{"role": "system", "content": system}]
-        messages.extend(_compact_history(history, max_items=6))
+        messages.extend(compact_history(history, max_items=6))
         messages.append({
             "role": "user",
             "content": (
@@ -1353,13 +200,13 @@ def query_rag():
 
         # ── Orchestrate ───────────────────────────────────────────────────────
         answer = (
-            _run_native_tool_path(query, history, messages, used_tools)
+            run_native_tool_path(query, history, messages, used_tools)
             if ENABLE_NATIVE_TOOL_CALL
-            else _run_legacy_tool_path(query, history, messages, used_tools)
+            else run_legacy_tool_path(query, history, messages, used_tools)
         )
 
         # ── Persist session ───────────────────────────────────────────────────
-        _persist_session(session_id, session, query, answer)
+        persist_session(session_id, session, query, answer)
 
         # ── Write cache ───────────────────────────────────────────────────────
         if use_cache:
