@@ -68,12 +68,15 @@ def execute_tool(tool_str: str, messages: list, used_tools: list) -> str:
             break
     query = _extract_clean_query(last_user)
 
+    _ERR = "Dạ hiện mình chưa lấy được thông tin từ hệ thống. Bạn thử lại sau ít phút nhé ạ."
+
     if "get_groups" in tool_str:
         used_tools.append("Tool [Backend API]: GET /services/groups")
-        groups = fetch_raw_groups()
-        if groups:
-            data_block = format_groups_for_llm(groups)
-            return llm_with_injected_data(query, data_block, messages)
+        result = fetch_raw_groups()
+        if not result.ok:
+            return _ERR
+        if result.data:
+            return llm_with_injected_data(query, format_groups_for_llm(result.data), messages)
         return handle_get_groups(messages, used_tools)
 
     if "get_promotions" in tool_str:
@@ -83,10 +86,11 @@ def execute_tool(tool_str: str, messages: list, used_tools: list) -> str:
         m2 = re.search(r'search="([^"]*)"', tool_str)
         search = normalize_service_search(m2.group(1) if m2 else "")
         used_tools.append(f'Tool [Backend API]: GET /services?search="{search}"')
-        services = fetch_raw_services(search)
-        if services:
-            data_block = format_services_for_llm(services, search)
-            return llm_with_injected_data(query, data_block, messages)
+        result = fetch_raw_services(search)
+        if not result.ok:
+            return _ERR
+        if result.data:
+            return llm_with_injected_data(query, format_services_for_llm(result.data, search), messages)
         return handle_get_services(search, messages, used_tools)
 
     return ""
@@ -198,6 +202,10 @@ def run_legacy_tool_path(query: str, history: list, messages: list, used_tools: 
 
 def run_native_tool_path(query: str, history: list, messages: list, used_tools: list) -> str:
     """Native function-calling path (cheese-server --jinja required)."""
+    static_early = static_fallback(query)
+    if static_early:
+        return static_early
+
     booking_resp = build_booking_response(query, history)
 
     if booking_resp and "CALL_TOOL: create_booking" in booking_resp:
@@ -242,7 +250,8 @@ def run_native_tool_path(query: str, history: list, messages: list, used_tools: 
             "Bạn xác nhận đặt lịch với thông tin này nhé?"
         )
 
-    return tool_result
+    fix = validate_llm_output(tool_result, None, query)
+    return fix if fix is not None else tool_result
 
 
 def persist_session(session_id: str, session: dict, query: str, answer: str):

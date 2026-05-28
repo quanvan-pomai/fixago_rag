@@ -93,22 +93,30 @@ def fetch_tool_data_block(tool_str: str, used_tools: list) -> str:
     Fetch raw backend data for a CALL_TOOL string and return a compact fact-block.
     Returns "" if no matching tool.
     """
+    _ERR = "Dạ hiện mình chưa lấy được thông tin từ hệ thống. Bạn thử lại sau ít phút nhé ạ."
+
     if "get_groups" in tool_str:
         used_tools.append("Tool [Backend API]: GET /services/groups")
-        groups = fetch_raw_groups()
-        return format_groups_for_llm(groups)
+        result = fetch_raw_groups()
+        if not result.ok:
+            return _ERR
+        return format_groups_for_llm(result.data)
 
     if "get_promotions" in tool_str:
         used_tools.append("Tool [Backend API]: GET /discounts/available")
-        promos = fetch_raw_promotions()
-        return format_promotions_for_llm(promos)
+        result = fetch_raw_promotions()
+        if not result.ok:
+            return _ERR
+        return format_promotions_for_llm(result.data)
 
     if "get_services" in tool_str:
         m = re.search(r'search="([^"]*)"', tool_str)
         search = normalize_service_search(m.group(1) if m else "")
         used_tools.append(f'Tool [Backend API]: GET /services?search="{search}"')
-        services = fetch_raw_services(search)
-        return format_services_for_llm(services, search)
+        result = fetch_raw_services(search)
+        if not result.ok:
+            return _ERR
+        return format_services_for_llm(result.data, search)
 
     return ""
 

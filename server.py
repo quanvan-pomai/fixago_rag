@@ -113,8 +113,8 @@ def query_rag():
         if not session.get("catalog_prefetched"):
             try:
                 _grps = fetch_raw_groups()
-                if _grps:
-                    session["catalog_summary"] = format_groups_for_llm(_grps)
+                if _grps.ok and _grps.data:
+                    session["catalog_summary"] = format_groups_for_llm(_grps.data)
                     session["catalog_prefetched"] = True
             except Exception:
                 pass
@@ -139,6 +139,7 @@ def query_rag():
                 persist_session(session_id, session, query, fast_answer)
                 return jsonify({
                     "status": "success",
+                    "session_id": session_id,
                     "response": fast_answer,
                     "source": "llm",
                     "tool_calls": used_tools,
@@ -177,6 +178,7 @@ def query_rag():
                 if cached:
                     return jsonify({
                         "status": "success",
+                        "session_id": session_id,
                         "response": cached.decode("utf-8"),
                         "source": "cache",
                         "tool_calls": [],
@@ -221,6 +223,7 @@ def query_rag():
 
         return jsonify({
             "status": "success",
+            "session_id": session_id,
             "response": answer,
             "source": "llm",
             "tool_calls": used_tools,

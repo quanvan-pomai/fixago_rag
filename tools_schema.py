@@ -27,7 +27,7 @@ FIXAGO_TOOLS = [
             "description": (
                 "Tìm kiếm dịch vụ cụ thể, tra giá, xem hạng mục sửa chữa. "
                 "Gọi khi khách hỏi giá, hỏi dịch vụ cụ thể, mô tả lỗi cần sửa. "
-                "Dùng từ khóa nhóm chính: 'điện', 'nước', 'điện lạnh', 'xây dựng', 'thạch cao'."
+                "Dùng từ khóa nhóm chính: 'điện', 'nước', 'máy lạnh', 'xây dựng', 'thạch cao'."
             ),
             "parameters": {
                 "type": "object",
@@ -38,11 +38,11 @@ FIXAGO_TOOLS = [
                             "Từ khóa tìm kiếm dịch vụ. Luôn dùng tên nhóm chính: "
                             "'điện' (ổ cắm, chập điện, aptomat...), "
                             "'nước' (rò nước, nghẹt ống, bồn cầu...), "
-                            "'điện lạnh' (máy lạnh, điều hòa, tủ lạnh...), "
+                            "'máy lạnh' (điều hòa, tủ lạnh, máy giặt...), "
                             "'xây dựng' (sơn, chống thấm, ốp lát...), "
                             "'thạch cao' (trần, vách ngăn...)."
                         ),
-                        "enum": ["điện", "nước", "điện lạnh", "xây dựng", "thạch cao"],
+                        "enum": ["điện", "nước", "máy lạnh", "xây dựng", "thạch cao"],
                     }
                 },
                 "required": ["search"],

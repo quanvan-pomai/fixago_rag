@@ -16,9 +16,18 @@ Caching strategy:
 import json
 import logging
 import os
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 import requests
+
+
+@dataclass
+class FetchResult:
+    """Wraps a backend fetch — distinguishes empty data from API error."""
+    ok: bool
+    data: list = field(default_factory=list)
+    error: str = ""
 
 logger = logging.getLogger("fixago.tools_handlers")
 
@@ -105,26 +114,27 @@ def _build_price_summary(services: List[Dict]) -> str:
 
 # ── Raw data fetchers (cached → backend) ─────────────────────────────────────
 
-def fetch_raw_groups() -> List[Dict]:
+def fetch_raw_groups() -> FetchResult:
     """Return raw group list. Served from cache when available."""
     cache_key = "grp_cache"
     cached = _cache_get(cache_key)
     if cached is not None:
         logger.debug("cache HIT: %s", cache_key)
-        return cached
+        return FetchResult(ok=True, data=cached)
 
     try:
         resp = requests.get(f"{BACKEND_URL}/services/groups", timeout=3)
         if resp.status_code == 200:
             data = resp.json() or []
             _cache_set(cache_key, data, _GRP_TTL_MS)
-            return data
+            return FetchResult(ok=True, data=data)
+        return FetchResult(ok=False, error=f"HTTP {resp.status_code}")
     except Exception as exc:
         logger.warning("fetch_raw_groups error: %s", exc)
-    return []
+        return FetchResult(ok=False, error=str(exc))
 
 
-def fetch_raw_services(search_arg: str) -> List[Dict]:
+def fetch_raw_services(search_arg: str) -> FetchResult:
     """
     Return raw service list for search_arg. Served from cache when available.
     search_arg="all" fetches a broad sample across multiple categories.
@@ -133,11 +143,10 @@ def fetch_raw_services(search_arg: str) -> List[Dict]:
     cached = _cache_get(cache_key)
     if cached is not None:
         logger.debug("cache HIT: %s", cache_key)
-        return cached
+        return FetchResult(ok=True, data=cached)
 
     try:
         if search_arg == "all":
-            # Fetch overview sample across all major categories
             all_services: List[Dict] = []
             for keyword in ["điện", "nước", "máy lạnh", "xây dựng"]:
                 resp = requests.get(
@@ -148,7 +157,7 @@ def fetch_raw_services(search_arg: str) -> List[Dict]:
                 if resp.status_code == 200:
                     all_services.extend(resp.json().get("data", []))
             _cache_set(cache_key, all_services, _SVC_TTL_MS)
-            return all_services
+            return FetchResult(ok=True, data=all_services)
 
         resp = requests.get(
             f"{BACKEND_URL}/services",
@@ -167,19 +176,20 @@ def fetch_raw_services(search_arg: str) -> List[Dict]:
                 if fb.status_code == 200:
                     services = fb.json().get("data", [])
             _cache_set(cache_key, services, _SVC_TTL_MS)
-            return services
+            return FetchResult(ok=True, data=services)
+        return FetchResult(ok=False, error=f"HTTP {resp.status_code}")
     except Exception as exc:
         logger.warning("fetch_raw_services error: %s", exc)
-    return []
+        return FetchResult(ok=False, error=str(exc))
 
 
-def fetch_raw_promotions() -> List[Dict]:
+def fetch_raw_promotions() -> FetchResult:
     """Return raw promotion list. Served from cache when available."""
     cache_key = "promo_cache"
     cached = _cache_get(cache_key)
     if cached is not None:
         logger.debug("cache HIT: %s", cache_key)
-        return cached
+        return FetchResult(ok=True, data=cached)
 
     try:
         resp = requests.get(f"{BACKEND_URL}/discounts/available", timeout=3)
@@ -187,10 +197,11 @@ def fetch_raw_promotions() -> List[Dict]:
             raw  = resp.json()
             data = raw if isinstance(raw, list) else raw.get("data", [])
             _cache_set(cache_key, data, _PROMO_TTL_MS)
-            return data
+            return FetchResult(ok=True, data=data)
+        return FetchResult(ok=False, error=f"HTTP {resp.status_code}")
     except Exception as exc:
         logger.warning("fetch_raw_promotions error: %s", exc)
-    return []
+        return FetchResult(ok=False, error=str(exc))
 
 
 def _fmt(price: int) -> str:
