@@ -167,13 +167,22 @@ def is_offtopic(query: str) -> bool:
     q_orig = ((query or "").strip().lower())
 
     # Vietnamese location names that contain off-topic keywords but are not off-topic
-    location_names = ["cần thơ", "can tho", "da nang", "ho chi minh", "hcm", "quận"]
+    # Check both accented and non-accented versions
+    location_names_accented = ["cần thơ", "đà nẵng", "hồ chí minh", "tp. hồ chí minh"]
+    location_names_normalized = ["can tho", "da nang", "ho chi minh", "tp. ho chi minh", "hcm"]
+    location_keywords = ["quận", "quan"]
 
-    # If query contains location names, it's not off-topic
-    if any(loc in q_orig for loc in location_names):
-        return False
-    if any(loc in q for loc in location_names):
-        return False
+    # If query contains exact location names (with or without accents), it's not off-topic
+    for loc in location_names_accented:
+        if loc in q_orig:
+            return False
+    for loc in location_names_normalized:
+        if loc in q:
+            return False
+    # If contains "quận" or similar with question pattern, it's likely area question
+    for kw in location_keywords:
+        if kw in q:
+            return False
 
     # Check Vietnamese off-topic keywords with word boundaries
     for kw in _OFFTOPIC_VI_KEYWORDS:
