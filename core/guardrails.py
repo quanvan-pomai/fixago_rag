@@ -315,8 +315,12 @@ def deterministic_business_reply(query: str) -> str:
 
 def _is_working_hours_question(q_normalized: str) -> bool:
     """Check if query asks about working hours."""
-    hour_signals = ["giờ", "hour", "mở", "open", "hoạt động", "working", "24/7"]
-    question_signals = ["mấy", "what", "lúc nào", "when", "thế nào", "lúc"]
+    # "may gio" = mấy giờ (how many hours / what time)
+    if "may gio" in q_normalized or "may giờ" in q_normalized:
+        return True
+    # Standard patterns
+    hour_signals = ["giờ", "hour", "mở", "open", "hoạt động", "hoat dong", "working", "24/7"]
+    question_signals = ["mấy", "may", "what", "lúc nào", "luc nao", "when", "thế nào", "the nao", "lúc", "luc"]
     return any(h in q_normalized for h in hour_signals) and any(
         s in q_normalized for s in question_signals
     )
@@ -325,10 +329,10 @@ def _is_working_hours_question(q_normalized: str) -> bool:
 def _is_payment_question(q_normalized: str) -> bool:
     """Check if query asks about payment methods."""
     payment_signals = [
-        "thanh toán", "payment", "tiền mặt", "cash",
-        "chuyển khoản", "transfer", "credit", "thẻ", "card"
+        "thanh toán", "thanh toan", "payment", "tiền mặt", "tien mat", "cash",
+        "chuyển khoản", "chuyen khoan", "transfer", "credit", "thẻ", "the", "card"
     ]
-    question_signals = ["nào", "what", "how", "được", "accept", "nhận"]
+    question_signals = ["nào", "nao", "what", "how", "được", "duoc", "accept", "nhận", "nhan"]
     return any(p in q_normalized for p in payment_signals) and any(
         s in q_normalized for s in question_signals
     )

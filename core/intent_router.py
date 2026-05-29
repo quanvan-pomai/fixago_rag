@@ -23,6 +23,10 @@ _NOACCENT_MAP = {
     "sua chua": "sửa chữa", "tran thach cao": "trần thạch cao",
     "chong tham": "chống thấm", "son nha": "sơn nhà", "lap dat": "lắp đặt",
     "dieu hoa": "điều hòa", "may nuoc nong": "máy nước nóng",
+    # Payment/Business keywords
+    "thanh toan": "thanh toán", "tien mat": "tiền mặt", "chuyen khoan": "chuyển khoản",
+    "lam viec": "làm việc", "hoat dong": "hoạt động", "phuc vu": "phục vụ",
+    "o dau": "ở đâu", "co ho tro": "có hỗ trợ", "khoa cua": "khóa cửa",
 }
 
 
