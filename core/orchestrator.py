@@ -99,6 +99,32 @@ def _detect_promotion_question(query: str) -> bool:
     return has_promo and has_question
 
 
+def _detect_area_question(query: str) -> bool:
+    """
+    Semantic detection for area/location questions.
+    Returns True if query is asking where Fixago is located or if it serves a location.
+    Uses semantic understanding: looks for location question patterns.
+    """
+    from core.intent_router import normalize_noaccent
+    q = normalize_noaccent((query or "").strip().lower())
+
+    # Location signals: asking WHERE something is
+    location_keywords = ["ở đâu", "o dau", "where", "location", "khu vực", "khu vuc"]
+
+    # Company/service context: asking about Fixago, company, service
+    company_keywords = [
+        "fixago", "công ty", "cong ty", "company", "service", "dịch vụ", "dich vu",
+        "em", "bạn", "ban", "you", "trụ sở", "tru so", "địa chỉ", "dia chi",
+        "address", "phục vụ", "phuc vu", "serve", "support"
+    ]
+
+    # Must have both location question and company context
+    has_location = any(k in q for k in location_keywords)
+    has_company = any(k in q for k in company_keywords)
+
+    return has_location and has_company
+
+
 def _infer_service_category(query: str) -> str:
     """
     Infer service category from repair keywords in the query.
@@ -429,6 +455,14 @@ def run_native_tool_path(query: str, history: list, messages: list, used_tools: 
     _promotion_check = _detect_promotion_question(query)
     if _promotion_check:
         return execute_tool("CALL_TOOL: get_promotions()", messages, used_tools)
+
+    # Area/location question → return service area (semantic detection)
+    _area_check = _detect_area_question(query)
+    if _area_check:
+        return (
+            "Dạ Fixago hiện đang phục vụ tại TP. Hồ Chí Minh, cụ thể là Quận 2, Quận 9 và TP. Thủ Đức ạ. "
+            "Anh/chị đang ở khu vực nào để mình xem hỗ trợ được không nhé?"
+        )
 
     # Price or repair question → call get_services with inferred category
     _price_repair_check = _detect_price_or_repair_question(query)
