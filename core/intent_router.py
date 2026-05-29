@@ -68,12 +68,18 @@ def detect_user_language(text: str) -> str:
     """Return 'en' if clearly English, else 'vi'. Used only for static strings."""
     if re.search(r'[àáâãèéêìíòóôõùúýăđơưạảấầẩẫậắằẳẵặẹẻẽếềểễệỉịọỏốồổỗộớờởỡợụủứừửữựỳỷỹỵ]', text, re.IGNORECASE):
         return "vi"
-    en_hits = re.findall(
-        r'\b(what|how|can|does|price|service|fix|repair|help|install|replace|cost|'
-        r'check|please|water|electric|working|hours|schedule|services|available|offer)\b',
+
+    # More generous English detection: check for any common English word
+    en_words = re.findall(
+        r'\b(you|your|me|my|i|the|a|an|is|are|am|be|been|being|have|has|had|do|does|did|'
+        r'can|could|would|will|should|must|write|poem|love|song|day|today|time|'
+        r'what|how|when|where|why|price|service|fix|repair|help|install|replace|cost|'
+        r'check|please|water|electric|working|hours|schedule|services|available|offer|code|discount|'
+        r'and|or|for|from|to|with|about|by|in|on|at|as|if|no|any|some|all|this|that|these|those)\b',
         text.lower()
     )
-    return "en" if len(set(en_hits)) >= 2 else "vi"
+    # If we find 3+ common English words, it's likely English
+    return "en" if len(en_words) >= 3 else "vi"
 
 
 def is_price_question(query: str) -> bool:

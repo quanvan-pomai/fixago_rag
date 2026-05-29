@@ -80,10 +80,81 @@ _INJECTION_PATTERNS = [
     "admin fixago", "tôi là admin", "mode on", "kiểm tra nội bộ",
 ]
 
+# Off-topic keywords that are clearly NOT home repair
+_OFFTOPIC_VI_KEYWORDS = [
+    "nấu", "nau", "nước sôi", "nuoc soi", "phở", "pho", "đồ ăn", "do an",
+    "món ăn", "mon an", "công thức", "cong thuc", "rau", "thịt", "thit",
+    "thơ", "tho", "thơ tình", "tho tinh", "viết", "viet", "tình yêu", "tinh yeu",
+    "tìm người", "tim nguoi", "hẹn hò", "hen ho", "yêu", "yeu", "lời yêu", "loi yeu",
+    "bài hát", "bai hat", "nhạc", "nhac", "phim", "xem phim",
+    "trò chơi", "tro choi", "game", "chơi", "choi",
+    "học", "hoc", "kiến thức", "kien thuc", "toán", "toan", "tiếng anh", "tieng anh",
+    "làm bài", "lam bai", "đồ họa", "do hoa", "lập trình", "lap trinh",
+    "công việc", "cong viec", "xin việc", "xin viec", "tìm việc", "tim viec",
+    "tiền", "tien", "mượn tiền", "muon tien", "vay tiền", "vay tien",
+    "bán", "ban", "mua", "buôn bán", "buon ban",
+    "du lịch", "du lich", "tour", "khách sạn", "khach san",
+    "bệnh", "benh", "thuốc", "thuoc", "sức khỏe", "suc khoe", "bác sĩ", "bac si",
+]
+
+_OFFTOPIC_EN_KEYWORDS = [
+    "cook", "recipe", "food", "eat", "cooking", "meal", "dish",
+    "poem", "write", "love", "romance", "relationship", "dating",
+    "music", "song", "lyrics", "movie", "film", "watch", "video",
+    "game", "play", "game", "gaming", "console", "video game",
+    "study", "learn", "school", "university", "homework", "math", "english",
+    "job", "work", "hire", "resume", "interview", "career",
+    "money", "loan", "borrow", "invest", "stock", "bitcoin",
+    "travel", "vacation", "hotel", "flight", "ticket",
+    "health", "doctor", "medicine", "drug", "disease", "sick",
+    "buy", "sell", "purchase", "shopping", "price",
+    "car", "motorcycle", "bike", "vehicle", "transport",
+]
+
 
 def is_prompt_injection(query: str) -> bool:
     q = (query or "").strip().lower()
     return any(p in q for p in _INJECTION_PATTERNS)
+
+
+def is_offtopic(query: str) -> bool:
+    """
+    Detect if query is clearly off-topic (not about home repair/services).
+    Returns True if query matches known non-repair keywords.
+    """
+    q = normalize_noaccent((query or "").strip().lower())
+
+    # Check Vietnamese off-topic keywords
+    if any(kw in q for kw in _OFFTOPIC_VI_KEYWORDS):
+        return True
+
+    # Check English off-topic keywords
+    if any(kw in q for kw in _OFFTOPIC_EN_KEYWORDS):
+        return True
+
+    return False
+
+
+def offtopic_response(query: str) -> str:
+    """
+    Generate appropriate off-topic rejection based on user language.
+    """
+    from core.intent_router import detect_user_language
+
+    lang = detect_user_language(query)
+
+    if lang == "en":
+        return (
+            "I appreciate your question, but I'm specifically designed to help with "
+            "home repair services (electrical, plumbing, AC, construction, drywall). "
+            "Can I help you with any repair or maintenance issues at your home?"
+        )
+    else:
+        # Vietnamese
+        return (
+            "Dạ mình cảm ơn câu hỏi của anh/chị, nhưng mình chỉ chuyên hỗ trợ dịch vụ sửa chữa nhà (điện, nước, điều hòa, xây dựng, thạch cao). "
+            "Có vấn đề sửa chữa hay bảo dưỡng nhà nào mình có thể giúp anh/chị không ạ?"
+        )
 
 
 def guardrail_response() -> dict:
