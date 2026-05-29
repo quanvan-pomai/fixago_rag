@@ -79,10 +79,14 @@ def _extract_natural_name(text: str) -> Optional[str]:
             val = _TRAILING_PARTICLES.sub('', val).strip()
         return val or None
 
-    # "Name: X" style (English)
-    m2 = re.search(r'\bname\s*[:\-]\s*([^\n,;]+)', text, re.IGNORECASE)
+    # "Name: X" style (English) — allow multiple words before comma
+    m2 = re.search(r'\bname\s*[:\-]\s*([^\n;]+)', text, re.IGNORECASE)
     if m2:
-        return m2.group(1).strip().rstrip('.,; ') or None
+        val = m2.group(1).strip().rstrip('.,; ')
+        # Handle "David Nguyen. Phone:" → extract "David Nguyen" only
+        val = val.split(',')[0].strip()  # split on comma if present
+        val = val.split('.')[0].strip() if val else val  # split on period if present
+        return val or None
 
     # Fallback: first capitalized word(s) before a phone number
     # e.g., "Tuấn 0912000111 7 Bạch Đằng" → "Tuấn"
@@ -109,9 +113,22 @@ def _extract_natural_address(text: str) -> Optional[str]:
     """
     Extract address from natural patterns:
       - "nhà ở X", "địa chỉ X", "ở X", "address X"
-      - "tại X", "nhà tại X"
+      - "tại X", "nhà tại X", "thành X" (change address to X)
       - fallback: segment starting with digit that looks like a street number
     """
+    # Handle "thành X" / "thay thành X" / "sửa thành X" patterns (change address to X)
+    m = re.search(
+        r'(?:thành|thanh)\s+([^\n;,\.]*\d+[^\n;,\.]*)',
+        text, re.IGNORECASE
+    )
+    if m:
+        val = m.group(1).strip().rstrip('.,; ')
+        # Strip trailing particles (nhé, ạ, etc.)
+        val = re.sub(r'\s+(?:nhé|ạ|nha|nè|đó|thôi|rồi|vậy|à|ơi)$', '', val, flags=re.IGNORECASE)
+        # Only return if it looks like an address (has digits and some text)
+        if re.search(r'\d+.*[a-zA-ZÀ-ỹ]|[a-zA-ZÀ-ỹ].*\d+', val):
+            return val
+
     m = re.search(
         r'(?:nhà\s+ở|nhà\s+tại|địa\s+chỉ|address)\s*[:\s]\s*'
         r'(\S[^\n;\.]{2,80})',
@@ -244,35 +261,44 @@ def detect_confirmation(query: str) -> bool:
 def merge_booking_info(query: str, history: List[Dict]) -> Dict[str, Optional[str]]:
     """
     Scan conversation history oldest-first, then override with the current query.
-    Later messages (including the current query) win for any given field.
+    Later messages (including the current query) win for name/phone/address.
+    Issue is extracted from the earliest user message that mentioned a repair problem.
     """
     info: Dict[str, Optional[str]] = {"name": None, "phone": None, "address": None, "issue": None}
 
+    # Pass 1: Extract contact info (name, phone, address) — later messages override earlier
     for msg in history[-12:]:
         if msg.get("role") == "system":
             continue
         extracted = extract_booking_from_text(msg.get("content", ""))
         for k, v in extracted.items():
-            if v:
-                info[k] = v  # later messages override earlier ones
+            if v and k != "issue":  # Don't override issue yet
+                info[k] = v
 
-    # Current query always overrides
-    for k, v in extract_booking_from_text(query).items():
-        if v:
+    # Current query overrides contact info but NOT issue (unless no issue exists)
+    cur_extracted = extract_booking_from_text(query)
+    for k, v in cur_extracted.items():
+        if v and k != "issue":  # Override name, phone, address but preserve issue
             info[k] = v
 
-    # Infer issue from recent user turns if still missing
+    # Pass 2: Issue detection — find the FIRST user turn that describes a repair problem
+    # This preserves the original problem even if user later updates contact info
+    issue_hints = ["sửa", "hỏng", "lỗi", "chập", "rò", "nghẹt", "không lạnh",
+                   "vỡ", "thấm", "dột", "tắc", "không lên", "không hoạt động", "chảy",
+                   "leak", "leaking", "pipe", "plumber", "fix", "repair",
+                   "not cold", "broken", "clog", "water"]
+
+    # Look for the FIRST (earliest) user message with booking intent or repair keywords
+    # This becomes the canonical issue
     if not info.get("issue"):
-        issue_hints = ["sửa", "hỏng", "lỗi", "chập", "rò", "nghẹt", "không lạnh",
-                       "vỡ", "thấm", "dột", "tắc", "không lên", "không hoạt động",
-                       "leak", "leaking", "pipe", "plumber", "fix", "repair",
-                       "not cold", "broken", "clog", "water"]
-        for msg in reversed(history[-12:]):
+        for msg in history[-12:]:
             if msg.get("role") == "user":
                 c = msg.get("content", "")
                 if detect_booking_intent(c) or any(h in c.lower() for h in issue_hints):
                     info["issue"] = c
                     break
+
+        # If still no issue, use current query
         if not info.get("issue"):
             info["issue"] = query
 

@@ -447,28 +447,10 @@ def run_native_tool_path(query: str, history: list, messages: list, used_tools: 
             return handle_create_booking(booking_resp, used_tools)
         return booking_resp
 
-    # SAFETY: Pre-checks for questions that small LLMs often skip
-    _service_overview_check = _detect_service_overview_question(query)
-    if _service_overview_check:
-        return execute_tool("CALL_TOOL: get_groups()", messages, used_tools)
-
-    _promotion_check = _detect_promotion_question(query)
-    if _promotion_check:
-        return execute_tool("CALL_TOOL: get_promotions()", messages, used_tools)
-
-    # Area/location question → return service area (semantic detection)
-    _area_check = _detect_area_question(query)
-    if _area_check:
-        return (
-            "Dạ Fixago hiện đang phục vụ tại TP. Hồ Chí Minh, cụ thể là Quận 2, Quận 9 và TP. Thủ Đức ạ. "
-            "Anh/chị đang ở khu vực nào để mình xem hỗ trợ được không nhé?"
-        )
-
-    # Price or repair question → call get_services with inferred category
-    _price_repair_check = _detect_price_or_repair_question(query)
-    if _price_repair_check:
-        category = _infer_service_category(query)
-        return execute_tool(f'CALL_TOOL: get_services(search="{category}")', messages, used_tools)
+    # LET LLM HANDLE SEMANTIC ROUTING
+    # Remove hardcoded pre-checks — Qwen2.5 3B is smart enough to understand intent
+    # The system prompt has explicit routing rules that the LLM will follow
+    # Trusting the model to call the right tools via native function calling
 
     try:
         tool_name, tool_result, raw_msg = llm_chat_with_tools(messages, temperature=0.0)

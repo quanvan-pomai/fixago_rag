@@ -118,7 +118,7 @@ _OFFTOPIC_VI_KEYWORDS = [
 
 _OFFTOPIC_EN_KEYWORDS = [
     # Cooking/Food
-    "cook", "recipe", "food", "eat", "cooking", "meal", "dish", "chef",
+    "cook", "recipe", "food", "eat", "cooking", "meal", "dish", "chef", "pasta", "pizza", "noodles",
 
     # Poetry/Romance/Entertainment
     "poem", "poetry", "write poem", "love poem", "love", "romance", "relationship", "dating",
@@ -249,24 +249,36 @@ def deterministic_business_reply(query: str) -> str:
     This layer is O(1) and does NOT attempt to answer service-related questions —
     those must go through native tool calling (get_services, get_groups, get_promotions).
     """
+    from core.intent_router import detect_user_language
+
     q = normalize_noaccent((query or "").strip().lower())
+    lang = detect_user_language(query)
 
     # ONLY answer pure business facts that have nothing to do with repair/booking
 
     # 1. Working hours (pure business fact)
     if _is_working_hours_question(q):
-        return "Dạ Fixago hoạt động 24/7, kể cả cuối tuần và ngày lễ."
+        if lang == "en":
+            return "Fixago operates 24/7, including weekends and holidays."
+        else:
+            return "Dạ Fixago hoạt động 24/7, kể cả cuối tuần và ngày lễ."
 
     # 2. Payment method (pure business fact)
     if _is_payment_question(q):
-        return "Dạ Fixago nhận thanh toán bằng tiền mặt hoặc chuyển khoản."
+        if lang == "en":
+            return "Fixago accepts cash or bank transfer."
+        else:
+            return "Dạ Fixago nhận thanh toán bằng tiền mặt hoặc chuyển khoản."
 
     # 3. Unsupported service (pure business fact — NOT about repair)
     if _is_unsupported_service_question(q):
-        return (
-            "Dạ hiện Fixago chưa hỗ trợ thay khóa cửa. "
-            "Anh/chị cần hỗ trợ dịch vụ nào khác không?"
-        )
+        if lang == "en":
+            return "Fixago doesn't currently support door lock replacement. Can I help with any other repair services?"
+        else:
+            return (
+                "Dạ hiện Fixago chưa hỗ trợ thay khóa cửa. "
+                "Anh/chị cần hỗ trợ dịch vụ nào khác không?"
+            )
 
     # DO NOT answer service overview, price, promotion, or response time here.
     # Let native tool calling handle those via get_groups, get_services, get_promotions.
