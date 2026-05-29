@@ -158,16 +158,35 @@ def is_offtopic(query: str) -> bool:
     """
     Detect if query is clearly off-topic (not about home repair/services).
     Returns True if query matches known non-repair keywords.
+    Uses word boundary checking to avoid substring false positives (e.g., "thơ" in "Cần Thơ").
+
+    Special case: Exclude Vietnamese location names that contain off-topic keywords
+    (e.g., "Cần Thơ" contains "thơ" but is a city name).
     """
     q = normalize_noaccent((query or "").strip().lower())
+    q_orig = ((query or "").strip().lower())
 
-    # Check Vietnamese off-topic keywords
-    if any(kw in q for kw in _OFFTOPIC_VI_KEYWORDS):
-        return True
+    # Vietnamese location names that contain off-topic keywords but are not off-topic
+    location_names = ["cần thơ", "can tho", "da nang", "ho chi minh", "hcm", "quận"]
 
-    # Check English off-topic keywords
-    if any(kw in q for kw in _OFFTOPIC_EN_KEYWORDS):
-        return True
+    # If query contains location names, it's not off-topic
+    if any(loc in q_orig for loc in location_names):
+        return False
+    if any(loc in q for loc in location_names):
+        return False
+
+    # Check Vietnamese off-topic keywords with word boundaries
+    for kw in _OFFTOPIC_VI_KEYWORDS:
+        # Use word boundary pattern to avoid substring matches
+        pattern = r'\b' + _re.escape(kw) + r'\b'
+        if _re.search(pattern, q_orig):
+            return True
+
+    # Check English off-topic keywords with word boundaries
+    for kw in _OFFTOPIC_EN_KEYWORDS:
+        pattern = r'\b' + _re.escape(kw) + r'\b'
+        if _re.search(pattern, q):
+            return True
 
     return False
 
