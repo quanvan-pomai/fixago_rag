@@ -81,34 +81,71 @@ _INJECTION_PATTERNS = [
 ]
 
 # Off-topic keywords that are clearly NOT home repair
+# IMPORTANT: Only add words that are NEVER used in repair/service context
 _OFFTOPIC_VI_KEYWORDS = [
+    # Cooking/Food
     "nấu", "nau", "nước sôi", "nuoc soi", "phở", "pho", "đồ ăn", "do an",
     "món ăn", "mon an", "công thức", "cong thuc", "rau", "thịt", "thit",
-    "thơ", "tho", "thơ tình", "tho tinh", "viết", "viet", "tình yêu", "tinh yeu",
-    "tìm người", "tim nguoi", "hẹn hò", "hen ho", "yêu", "yeu", "lời yêu", "loi yeu",
+
+    # Poetry/Romance
+    "thơ", "tho", "thơ tình", "tho tinh", "viết thơ", "viet tho",
+    "tình yêu", "tinh yeu", "tìm người yêu", "tim nguoi yeu", "hẹn hò", "hen ho",
+    "lời yêu", "loi yeu", "tâm sự", "tam su",
+
+    # Entertainment
     "bài hát", "bai hat", "nhạc", "nhac", "phim", "xem phim",
-    "trò chơi", "tro choi", "game", "chơi", "choi",
+    "trò chơi", "tro choi", "game", "chơi game", "choi game",
+
+    # Education (not related to home repair)
     "học", "hoc", "kiến thức", "kien thuc", "toán", "toan", "tiếng anh", "tieng anh",
     "làm bài", "lam bai", "đồ họa", "do hoa", "lập trình", "lap trinh",
+
+    # Jobs/Career (not home repair)
     "công việc", "cong viec", "xin việc", "xin viec", "tìm việc", "tim viec",
-    "tiền", "tien", "mượn tiền", "muon tien", "vay tiền", "vay tien",
-    "bán", "ban", "mua", "buôn bán", "buon ban",
-    "du lịch", "du lich", "tour", "khách sạn", "khach san",
+
+    # Finance (not about service cost)
+    "mượn tiền", "muon tien", "vay tiền", "vay tien", "lãi suất", "lai suat",
+
+    # Commerce (not about repair)
+    "buôn bán", "buon ban", "cửa hàng", "cua hang", "siêu thị", "sieu thi",
+
+    # Travel
+    "du lịch", "du lich", "tour", "khách sạn", "khach san", "máy bay", "may bay",
+
+    # Health/Medical
     "bệnh", "benh", "thuốc", "thuoc", "sức khỏe", "suc khoe", "bác sĩ", "bac si",
 ]
 
 _OFFTOPIC_EN_KEYWORDS = [
-    "cook", "recipe", "food", "eat", "cooking", "meal", "dish",
-    "poem", "write", "love", "romance", "relationship", "dating",
+    # Cooking/Food
+    "cook", "recipe", "food", "eat", "cooking", "meal", "dish", "chef",
+
+    # Poetry/Romance/Entertainment
+    "poem", "poetry", "write poem", "love poem", "love", "romance", "relationship", "dating",
     "music", "song", "lyrics", "movie", "film", "watch", "video",
-    "game", "play", "game", "gaming", "console", "video game",
-    "study", "learn", "school", "university", "homework", "math", "english",
-    "job", "work", "hire", "resume", "interview", "career",
-    "money", "loan", "borrow", "invest", "stock", "bitcoin",
-    "travel", "vacation", "hotel", "flight", "ticket",
-    "health", "doctor", "medicine", "drug", "disease", "sick",
-    "buy", "sell", "purchase", "shopping", "price",
-    "car", "motorcycle", "bike", "vehicle", "transport",
+    "game", "gaming", "console", "video game", "play game",
+
+    # Education
+    "study", "learn", "school", "university", "homework", "math", "english", "course",
+    "lecture", "textbook", "assignment",
+
+    # Jobs/Career
+    "job", "work", "hire", "resume", "interview", "career", "employment",
+
+    # Finance (not about service cost)
+    "loan", "borrow", "invest", "stock", "bitcoin", "crypto", "interest rate",
+
+    # Travel
+    "travel", "vacation", "hotel", "flight", "ticket", "airplane", "tour",
+
+    # Health/Medical
+    "health", "doctor", "medicine", "drug", "disease", "sick", "illness", "hospital",
+
+    # General commerce (not about repair service)
+    "shopping", "commerce", "store", "retail",
+
+    # Vehicles (not about repair)
+    "car", "motorcycle", "bike", "vehicle", "transport", "drive",
 ]
 
 

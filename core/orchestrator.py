@@ -402,16 +402,16 @@ def run_native_tool_path(query: str, history: list, messages: list, used_tools: 
     if static_early:
         return static_early
 
-    # Off-topic detection — reject non-repair questions BEFORE booking check
-    from core.guardrails import is_offtopic, offtopic_response
-    if is_offtopic(query):
-        return offtopic_response(query)
-
     # Deterministic business facts layer — answer stable questions without LLM
     from core.guardrails import deterministic_business_reply
     biz_reply = deterministic_business_reply(query)
     if biz_reply:
         return biz_reply
+
+    # Off-topic detection — reject non-repair questions AFTER business facts but BEFORE booking
+    from core.guardrails import is_offtopic, offtopic_response
+    if is_offtopic(query):
+        return offtopic_response(query)
 
     # Booking state machine: deterministic slot extraction before LLM routing
     booking_resp = build_booking_response(query, history)
