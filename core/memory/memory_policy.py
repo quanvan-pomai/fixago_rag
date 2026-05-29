@@ -30,7 +30,7 @@ _PHONE_RE = re.compile(r"(\+84|0)(?:[\s\.-]*\d){8,10}")
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _TOKEN_RE = re.compile(r"\b(?:ghp|sk|xox[baprs]|AIza)[A-Za-z0-9_\-]{12,}\b")
 _ADDRESS_RE = re.compile(
-    r"\b(?:địa chỉ|dia chi|address|ở|nha o|nhà ở)\b[^,\n]*(?:\d+[^,\n]*)",
+    r"\b(?:nhà tôi|địa chỉ của tôi|tôi ở|mình ở|em ở|tôi sống|nhà em|dia chi cua toi|toi o|minh o|em o)\b[^,\n]*(?:\d+[^,\n]*)",
     re.IGNORECASE,
 )
 _NAME_RE = re.compile(r"\b(?:tôi tên|toi ten|tên mình|ten minh|name:|tên)\s+[A-ZÀ-Ỵa-zà-ỵ]{2,}", re.IGNORECASE)

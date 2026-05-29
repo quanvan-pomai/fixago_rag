@@ -1,93 +1,35 @@
-"""Unit tests for core/intent_router.py — no external deps."""
+"""
+Unit tests for core/intent_router.py — no external deps.
+
+Phase 7: detect_tool_intent() is a stub returning None (semantic routing by LLM).
+Tests updated to verify utility functions still work correctly.
+"""
 import os
 os.environ.setdefault("FIXAGO_TEST_MODE", "1")
 
 import pytest
-from core.intent_router import detect_tool_intent, is_hours_question, normalize_noaccent
+from core.intent_router import detect_tool_intent, is_hours_question, normalize_noaccent, is_price_question, detect_user_language
 
 
-# ── Service taxonomy ──────────────────────────────────────────────────────────
-
-@pytest.mark.parametrize("query,expected_svc", [
-    ("máy lạnh bị hỏng",          "máy lạnh"),
-    ("điều hòa không lạnh giá sao", "máy lạnh"),
-    ("may lanh khong lanh",         "máy lạnh"),   # no-accent
-    ("Ống nước bị rò rỉ giá bao nhiêu", "nước"),
-    ("chống thấm tường nhà giá sao",    "xây dựng"),
-    ("tường bị thấm nước xử lý sao",    "xây dựng"),  # must NOT be "nước"
-    ("sửa ổ cắm điện bao nhiêu",        "điện"),
-    ("gia ca sua dien the nao",          "điện"),
-    ("giá cả sửa điện thế nào",          "điện"),
-    ("chập điện giá bao nhiêu",          "điện"),
-    ("thạch cao trần nhà bao nhiêu",     "thạch cao"),
-    ("vách ngăn thạch cao giá sao",      "thạch cao"),
-    ("sửa máy giặt giá bao nhiêu",       "máy lạnh"),  # máy giặt → máy lạnh category
-])
-def test_service_routing(query, expected_svc):
-    result = detect_tool_intent(query)
-    assert result is not None, f"Expected tool call for: {query!r}"
-    assert f'search="{expected_svc}"' in result, (
-        f"Expected search={expected_svc!r} in {result!r} for query {query!r}"
-    )
-
-
-def test_tường_thấm_not_nước():
-    """'Tường bị thấm nước' must route to xây dựng, not nước."""
-    result = detect_tool_intent("Tường bị thấm nước xử lý sao?")
-    assert result is not None
-    assert '"nước"' not in result
-    assert '"xây dựng"' in result
-
-
-def test_may_lanh_not_nuoc():
-    """'Máy lạnh nhỏ giọt nước' must route to máy lạnh, not nước."""
-    result = detect_tool_intent("Máy lạnh nhỏ giọt nước sửa bao nhiêu?")
-    assert result is not None
-    assert '"nước"' not in result
-    assert '"máy lạnh"' in result
-
+# ── detect_tool_intent stub ──────────────────────────────────────────────────
+# Phase 7: routing is handled by LLM via native tool calling.
+# detect_tool_intent() returns None for all queries.
 
 @pytest.mark.parametrize("query", [
-    "fixago co ban nuoc mia khong?",
-    "có bán nước mía không",
-    "bên bạn có bán đồ uống không",
-])
-def test_product_sales_not_routed_to_water_service(query):
-    result = detect_tool_intent(query)
-    assert result is None
-
-
-# ── Group pattern ─────────────────────────────────────────────────────────────
-
-@pytest.mark.parametrize("query", [
+    "máy lạnh bị hỏng",
+    "điều hòa không lạnh giá sao",
+    "Ống nước bị rò rỉ giá bao nhiêu",
+    "sửa ổ cắm điện bao nhiêu",
     "Fixago có dịch vụ gì?",
-    "bên bạn làm gì",
-    "có sửa gì không",
-    "fixago co gi",
-    "ben ban co gi",
-    "co dich vu gi",
-    "What services do you offer?",
-    "what can fixago do",
-])
-def test_group_pattern(query):
-    result = detect_tool_intent(query)
-    assert result == "CALL_TOOL: get_groups()", f"got {result!r} for {query!r}"
-
-
-# ── Promotions ────────────────────────────────────────────────────────────────
-
-@pytest.mark.parametrize("query", [
     "Có khuyến mãi không?",
-    "hôm nay có ưu đãi gì không",
-    "cho tôi mã giảm giá",
-    "Do you have any discount?",
+    "fixago co ban nuoc mia khong?",
 ])
-def test_promotion_pattern(query):
-    result = detect_tool_intent(query)
-    assert result == "CALL_TOOL: get_promotions()", f"got {result!r} for {query!r}"
+def test_detect_tool_intent_returns_none(query):
+    """detect_tool_intent is a stub; all routing delegated to LLM."""
+    assert detect_tool_intent(query) is None
 
 
-# ── Hours ─────────────────────────────────────────────────────────────────────
+# ── Hours classifier ──────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("text,expected", [
     ("giờ làm việc bên bạn thế nào", True),
@@ -100,19 +42,26 @@ def test_is_hours_question(text, expected):
     assert is_hours_question(text) == expected
 
 
-# ── No tool for booking confirmation ─────────────────────────────────────────
+# ── Price classifier ──────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("query", [
-    "Xác nhận",
-    "ok đặt đi",
-    "chốt",
+@pytest.mark.parametrize("text,expected", [
+    ("sửa điện bao nhiêu", True),
+    ("giá vệ sinh máy lạnh", True),
+    ("how much to fix the pipe", True),
+    ("xin chào", False),
+    ("Fixago có dịch vụ gì", False),
 ])
-def test_no_tool_for_confirmation(query):
-    # Confirmation words alone should not trigger a tool call
-    result = detect_tool_intent(query)
-    # May be None or None — booking flow handles these, not tool intent
-    # We just assert it's not a service lookup
-    assert result is None or "get_services" not in result
+def test_is_price_question(text, expected):
+    assert is_price_question(text) == expected
+
+
+# ── Language detection ────────────────────────────────────────────────────────
+
+def test_detect_language_vietnamese():
+    assert detect_user_language("máy lạnh bị hỏng") == "vi"
+
+def test_detect_language_english():
+    assert detect_user_language("how much does it cost to fix the pipe") == "en"
 
 
 # ── normalize_noaccent ────────────────────────────────────────────────────────
@@ -122,3 +71,12 @@ def test_normalize_may_lanh():
 
 def test_normalize_dien():
     assert "điện" in normalize_noaccent("dien")
+
+def test_normalize_sua_chua():
+    # "sua" → "sửa" replaces before the compound "sua chua" → "sửa chữa" can fire
+    # The result contains "sửa" either way — verify the accent is applied
+    result = normalize_noaccent("sua chua")
+    assert "sửa" in result
+
+def test_normalize_chong_tham():
+    assert "chống thấm" in normalize_noaccent("chong tham")

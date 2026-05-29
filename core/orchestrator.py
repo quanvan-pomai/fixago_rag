@@ -23,14 +23,131 @@ from core.session import SessionManager
 from llm_client.client import llm_chat, llm_chat_with_tools
 from tools.handlers import (
     fetch_raw_groups, fetch_raw_services, fetch_raw_promotions,
-    format_groups_for_llm, format_services_for_llm,
+    format_groups_for_llm, format_services_direct,
     handle_get_groups, handle_get_promotions, handle_get_services,
 )
 from booking.extractor import detect_confirmation
 
 _HOURS_FACT = "Fixago hoạt động 24/7, kể cả cuối tuần và ngày lễ."
+_DATA_INJECTION_MAX_TOKENS = 120
+
+# Focused system prompts for data-injection LLM calls. The full booking protocol
+# causes the 3B model to skip price data and jump straight to collecting contacts,
+# so we use a minimal, example-driven prompt for this specific call.
+_DATA_INJECTION_SYSTEM = {
+    "en": (
+        "You are Fixie, Fixago assistant. 2 sentences max. "
+        "Example: 'AC repair costs around 250,000 VNĐ. "
+        "Could you share your name, phone, and address so I can book a technician?'"
+    ),
+    "vi": (
+        "Bạn là Fixie của Fixago. Tối đa 2 câu, dùng 'Dạ/anh/chị/mình'. "
+        "Ví dụ: 'Dạ sửa ổ cắm tham khảo khoảng 150.000đ ạ. "
+        "Anh/chị cho mình xin tên, SĐT và địa chỉ để đặt lịch thợ nhé?'"
+    ),
+}
+
 _SHORT_YES = {"có", "co", "yes", "ok", "ừ", "uh", "đúng", "dung", "muốn", "muon"}
 _TOOL_ANSWER_TTL_MS = 30 * 60 * 1000
+
+
+def _detect_service_overview_question(query: str) -> bool:
+    """
+    Pre-check for service overview questions.
+    Returns True if query is clearly asking "what services do you offer".
+    This is a safety net for small LLMs that may not reliably call get_groups().
+    """
+    from core.intent_router import normalize_noaccent
+    q = normalize_noaccent((query or "").strip().lower())
+
+    # Service overview signals
+    service_signals = ["dịch vụ", "service", "làm", "do", "offer"]
+    overview_signals = [
+        "gì", "what", "nào", "which", "những", "có gì", "những gì",
+        "offer", "provide", "cung cấp", "làm gì"
+    ]
+
+    # Must contain both a service word AND an overview word
+    has_service = any(s in q for s in service_signals)
+    has_overview = any(o in q for o in overview_signals)
+
+    return has_service and has_overview
+
+
+def _detect_promotion_question(query: str) -> bool:
+    """
+    Pre-check for promotion/discount questions.
+    Returns True if query asks about discounts, vouchers, or promotions.
+    This is a safety net for small LLMs that may confuse promotions with prices.
+    """
+    from core.intent_router import normalize_noaccent
+    q = normalize_noaccent((query or "").strip().lower())
+
+    # Promotion signals
+    promo_signals = [
+        "khuyến mãi", "khuyen mai", "giảm giá", "giam gia",
+        "discount", "voucher", "coupon", "ưu đãi", "uu dai",
+        "mã giảm", "ma giam", "code"
+    ]
+
+    question_signals = ["có", "co", "nào", "what", "gì", "gi", "code", "mã"]
+
+    # Must have both promotion word and question signal
+    has_promo = any(p in q for p in promo_signals)
+    has_question = any(s in q for s in question_signals)
+
+    return has_promo and has_question
+
+
+def _infer_service_category(query: str) -> str:
+    """
+    Infer service category from repair keywords in the query.
+    Returns category name or "all" if unclear.
+    """
+    from core.intent_router import normalize_noaccent
+    q = normalize_noaccent((query or "").strip().lower())
+
+    # Category inference
+    categories = {
+        "điện": ["ổ cắm", "o cam", "chập", "chap", "điện", "dien", "cắt", "cat", "dây", "day", "công tắc", "cong tac", "bóng đèn", "bong den", "tủ điện", "tu dien", "aptomat", "mất điện", "mat dien"],
+        "nước": ["nước", "nuoc", "ống", "ong", "rò rỉ", "ro ri", "rò", "ro", "cống", "cong", "thoát", "thoat", "vòi", "voi", "bồn cầu", "bon cau", "vệ sinh", "ve sinh"],
+        "máy lạnh": ["máy lạnh", "may lanh", "ac", "điều hòa", "dieu hoa", "lạnh", "lanh", "lạnh không"],
+        "xây dựng": ["xây", "xay", "trần", "tran", "vách", "vach", "chống thấm", "chong tham", "thấm", "tham", "sơn", "son"],
+        "thạch cao": ["thạch cao", "thach cao", "vách ngăn", "vach ngan", "trần thạch", "tran thach"],
+    }
+
+    for category, keywords in categories.items():
+        if any(k in q for k in keywords):
+            return category
+
+    return "all"
+
+
+def _detect_price_or_repair_question(query: str) -> bool:
+    """
+    Pre-check for price/repair questions that small LLMs often skip.
+    Returns True if query asks about price OR describes a repair issue with price intent.
+    """
+    from core.intent_router import is_price_question, normalize_noaccent
+
+    # If it's a price question, return True
+    if is_price_question(query):
+        return True
+
+    # Also check for repair descriptions that might need tool call
+    # (even if not explicitly asking for price, repair issue + repair keywords warrants get_services)
+    q = normalize_noaccent((query or "").strip().lower())
+
+    repair_signals = [
+        "chập", "chap", "hỏng", "hong", "không lạnh", "khong lanh",
+        "rò rỉ", "ro ri", "tắc", "tac", "vỡ", "vo", "bị", "bi",
+        "sửa", "sua", "fix", "repair"
+    ]
+
+    has_repair = any(r in q for r in repair_signals)
+    has_service_mention = any(s in q for s in ["điện", "dien", "nước", "nuoc", "máy lạnh", "may lanh", "xây dựng", "xay dung"])
+
+    return has_repair and has_service_mention
 
 
 def _is_yes_to_service_list(query: str, history: list) -> bool:
@@ -105,15 +222,18 @@ def llm_with_injected_data(query: str, data_block: str, messages: list, cache_ke
         if cached:
             return cached
 
+    from core.intent_router import detect_user_language
+    lang = detect_user_language(query)
+
     instruction = (
         f"[DỮ LIỆU HỆ THỐNG — chỉ dùng thông tin này để trả lời, không bịa thêm]\n"
         f"{data_block}\n"
         f"[/DỮ LIỆU]\n\n"
         f"{query}"
     )
-    system_messages = [m for m in messages if m.get("role") == "system"][:1]
-    llm_messages = system_messages + [{"role": "user", "content": instruction}]
-    raw = llm_chat(llm_messages, temperature=0.15)
+    focused_system = _DATA_INJECTION_SYSTEM.get(lang, _DATA_INJECTION_SYSTEM["vi"])
+    llm_messages = [{"role": "system", "content": focused_system}, {"role": "user", "content": instruction}]
+    raw = llm_chat(llm_messages, temperature=0.15, max_tokens=_DATA_INJECTION_MAX_TOKENS)
     fix = validate_llm_output(raw, data_block, query)
     answer = fix if fix is not None else raw
     if cache_key and answer:
@@ -153,8 +273,8 @@ def execute_tool(tool_str: str, messages: list, used_tools: list) -> str:
         if not result.ok:
             return _ERR
         if result.data:
-            cache_key = _tool_answer_cache_key("get_services", query, _stable_data_hash(result.data), search)
-            return llm_with_injected_data(query, format_services_for_llm(result.data, search), messages, cache_key=cache_key)
+            from core.intent_router import detect_user_language
+            return format_services_direct(result.data, search, lang=detect_user_language(query))
         return handle_get_services(search, messages, used_tools)
 
     return ""
@@ -270,35 +390,68 @@ def run_legacy_tool_path(query: str, history: list, messages: list, used_tools: 
     return fix if fix is not None else raw
 
 
+_NATIVE_TOOL_FALLBACK = (
+    "Dạ mình có thể hỗ trợ hạng mục này. "
+    "Anh/chị cho mình xin tên, SĐT và địa chỉ để đặt lịch thợ kiểm tra nhé?"
+)
+
+
 def run_native_tool_path(query: str, history: list, messages: list, used_tools: list) -> str:
     """Native function-calling path (cheese-server --jinja required)."""
     static_early = static_fallback(query)
     if static_early:
         return static_early
 
+    # Deterministic business facts layer — answer stable questions without LLM
+    from core.guardrails import deterministic_business_reply
+    biz_reply = deterministic_business_reply(query)
+    if biz_reply:
+        return biz_reply
+
+    # Booking state machine: deterministic slot extraction before LLM routing
     booking_resp = build_booking_response(query, history)
-
-    if booking_resp and "CALL_TOOL: create_booking" in booking_resp:
-        return handle_create_booking(booking_resp, used_tools)
-
-    if booking_resp and "CALL_TOOL" not in booking_resp:
+    if booking_resp:
+        booking_resp = repair_booking_tool_call(booking_resp, query, history)
+        if "create_booking" in booking_resp.lower():
+            return handle_create_booking(booking_resp, used_tools)
         return booking_resp
 
-    tool_name, tool_result, raw_msg = llm_chat_with_tools(messages, temperature=0.0)
+    # SAFETY: Pre-checks for questions that small LLMs often skip
+    _service_overview_check = _detect_service_overview_question(query)
+    if _service_overview_check:
+        return execute_tool("CALL_TOOL: get_groups()", messages, used_tools)
 
-    if tool_name == "get_groups":
+    _promotion_check = _detect_promotion_question(query)
+    if _promotion_check:
+        return execute_tool("CALL_TOOL: get_promotions()", messages, used_tools)
+
+    # Price or repair question → call get_services with inferred category
+    _price_repair_check = _detect_price_or_repair_question(query)
+    if _price_repair_check:
+        category = _infer_service_category(query)
+        return execute_tool(f'CALL_TOOL: get_services(search="{category}")', messages, used_tools)
+
+    try:
+        tool_name, tool_result, raw_msg = llm_chat_with_tools(messages, temperature=0.0)
+    except Exception:
+        # Timeout or server error — return safe deterministic fallback
+        return _NATIVE_TOOL_FALLBACK
+
+    # If LLM didn't call a tool, return its plain text response
+    # (The system prompt should guide it to call tools for price/repair questions)
+
+    # Tool call: fetch data + inject [DỮ LIỆU HỆ THỐNG] + re-call LLM with price
+    if tool_name in ("get_groups", "get_services", "get_promotions"):
         messages.append({"role": "assistant", "content": None, "tool_calls": raw_msg.get("tool_calls")})
-        return handle_get_groups(messages, used_tools)
+        if tool_name == "get_services":
+            raw_svc = tool_result.get("category") or tool_result.get("search", "")
+            search = normalize_service_search(raw_svc)
+            tool_str = f'CALL_TOOL: get_services(search="{search}")'
+        else:
+            tool_str = f"CALL_TOOL: {tool_name}()"
+        return execute_tool(tool_str, messages, used_tools)
 
-    if tool_name == "get_services":
-        search = normalize_service_search(tool_result.get("search", ""))
-        messages.append({"role": "assistant", "content": None, "tool_calls": raw_msg.get("tool_calls")})
-        return handle_get_services(search, messages, used_tools)
-
-    if tool_name == "get_promotions":
-        messages.append({"role": "assistant", "content": None, "tool_calls": raw_msg.get("tool_calls")})
-        return handle_get_promotions(messages, used_tools)
-
+    # Booking: LLM extracted contact info or user confirmed
     if tool_name == "create_booking":
         if detect_confirmation(query):
             n, p, a, d = (
@@ -320,6 +473,7 @@ def run_native_tool_path(query: str, history: list, messages: list, used_tools: 
             "Bạn xác nhận đặt lịch với thông tin này nhé?"
         )
 
+    # No tool called: LLM returned plain text (booking collection, clarification, etc.)
     fix = validate_llm_output(tool_result, None, query)
     return fix if fix is not None else tool_result
 

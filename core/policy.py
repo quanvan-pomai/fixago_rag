@@ -149,7 +149,7 @@ def policy_for_intent(intent_result: IntentResult, query: str) -> ResponsePolicy
             temperature=0.15,
         )
 
-    # 7. Service price — HIGH confidence → SERVICE_PRICE; LOW/MEDIUM → UNKNOWN_CLARIFY
+    # 7. Service price — only when a real tool_call_str is present (legacy path)
     if "get_services" in tool:
         if intent_result.confidence == Confidence.HIGH:
             return ResponsePolicy(
@@ -171,17 +171,8 @@ def policy_for_intent(intent_result: IntentResult, query: str) -> ResponsePolicy
                 temperature=0.2,
             )
 
-    # 8. No tool matched, low confidence
-    if intent_result.confidence == Confidence.LOW:
-        return ResponsePolicy(
-            policy_type=PolicyType.UNKNOWN_CLARIFY,
-            llm_instruction="Hỏi một câu ngắn để làm rõ nhu cầu của khách.",
-            should_cache=False,
-            retrieve_rag=False,
-            temperature=0.2,
-        )
-
-    # 9. Fallthrough
+    # 8. Fallthrough — includes native tool path (tool=None, confidence=LOW)
+    #    LLM decides tool call semantically; policy just sets temperature + cache.
     return ResponsePolicy(
         policy_type=PolicyType.GENERAL_FIXAGO_QA,
         llm_instruction="Trả lời ngắn gọn, thân thiện về dịch vụ Fixago.",

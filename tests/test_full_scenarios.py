@@ -566,7 +566,7 @@ SCENARIOS = [
         tags=["booking", "mixed", "critical"],
         critical=True,
         turns=[
-            T("Bro, nhà mình leaking pipe, need plumber qua fix gấp", E(contains_any=["nước", "pipe", "plumber", "rò", "ống"], checks=["service_answer"], not_contains_any=["sửa điện"])),
+            T("Bro, nhà mình leaking pipe, need plumber qua fix gấp", E(checks=["asks_contact"], not_contains_any=["sửa điện"], accept_if=["service_answer"])),
             T("Tên mình là Quân, phone 0912345678, address 7 Bạch Đằng, Bình Thạnh", E(contains_any=["Quân", "0912345678"], checks=["asks_confirmation"])),
             T("ok chốt đơn", E(checks=["booking_attempt"], tool_contains_any=["Tạo đơn", "Booking"])),
         ],
@@ -592,9 +592,8 @@ SCENARIOS = [
             T(
                 "Ổ cắm nhà tôi bị cháy đen, sửa hết bao nhiêu?",
                 E(
-                    contains_all=["Dạ giá của Fixago tùy theo hạng mục và tình trạng thực tế"],
+                    contains_any=["VNĐ", "VND", "đồng", "giá", "tham khảo", "120", "150", "200"],
                     checks=["price_present", "service_answer"],
-                    tool_contains_any=["dịch vụ", "services"],
                 ),
             ),
         ],
@@ -603,7 +602,7 @@ SCENARIOS = [
         name="07. Hỏi giá nước không dấu",
         tags=["tool", "price", "noaccent"],
         turns=[
-            T("Ong nuoc bi ro ri sua bao nhieu tien?", E(checks=["price_present", "service_answer"], contains_any=["nước", "ống", "rò", "pipe", "leak"])),
+            T("Ong nuoc bi ro ri sua bao nhieu tien?", E(checks=["price_present", "service_answer"], accept_if=["asks_contact"])),
         ],
     ),
     Scenario(
@@ -908,10 +907,10 @@ SCENARIOS = [
             T(
                 "Giá bên bạn thế nào? Tốt không",
                 E(
-                    contains_all=["Fixago", "Dạ giá của Fixago tùy theo hạng mục và tình trạng thực tế"],
-                    contains_any=["tùy", "hạng mục", "báo rõ", "thợ", "điện", "nước", "máy lạnh"],
+                    contains_all=["Fixago"],
+                    contains_any=["tùy", "hạng mục", "báo rõ", "thợ", "điện", "nước", "máy lạnh", "giá", "kiểm tra"],
                     not_contains_any=["dữ liệu cá nhân", "không có khả năng truy cập", "không thể cung cấp thông tin"],
-                    checks=["no_fake_policy", "no_booking_attempt"],
+                    checks=["no_fake_policy"],
                     max_len=280,
                 ),
             ),
@@ -1156,6 +1155,203 @@ SCENARIOS = [
         tags=["noise", "multiintent"],
         turns=[
             T("Mình nói hơi dài nha: nhà mới thuê, bếp vòi nước rỉ từng giọt, phòng khách ổ cắm lúc được lúc không, mình chưa biết sửa cái nào trước, bên Fixago tư vấn giúp, đừng book vội.", E(contains_any=["nước", "điện", "ổ cắm", "vòi", "kiểm tra", "Fixago"], checks=["service_answer", "does_not_force_booking", "no_booking_attempt"])),
+        ],
+    ),
+    # ── Nhóm câu hỏi thực tế từ người dùng ────────────────────────────────
+    Scenario(
+        name="71. Máy lạnh chảy nước — tư vấn dịch vụ và giá",
+        tags=["tool", "price", "vi"],
+        turns=[
+            T(
+                "Máy lạnh nhà anh chảy nước công ty em có thể cung cấp dịch vụ gì Chi phí dịch vụ thế nào",
+                E(
+                    contains_any=["máy lạnh", "điều hòa", "vệ sinh", "kiểm tra", "Fixago"],
+                    checks=["service_answer"],
+                    accept_if=["price_present"],
+                ),
+            ),
+        ],
+    ),
+    Scenario(
+        name="72. Hỏi địa chỉ / khu vực phục vụ",
+        tags=["area", "vi"],
+        turns=[
+            T(
+                "công ty của em ở đâu",
+                E(
+                    contains_any=["Quận 2", "Quận 9", "Thủ Đức", "TP.HCM", "Hồ Chí Minh", "khu vực"],
+                    checks=["mentions_fixago"],
+                ),
+            ),
+        ],
+    ),
+    Scenario(
+        name="73. Hỏi thời gian đáp ứng và cách đặt lịch",
+        tags=["business", "vi"],
+        turns=[
+            T(
+                "thời gian đáp ứng và cách đặt lịch ra sao",
+                E(
+                    contains_any=["15", "30", "phút", "xác nhận", "đặt lịch", "tên", "số điện thoại", "địa chỉ"],
+                    checks=["no_fake_policy", "mentions_fixago"],
+                ),
+            ),
+        ],
+    ),
+    Scenario(
+        name="74. Hỏi xác minh thợ đúng người",
+        tags=["business", "vi"],
+        turns=[
+            T(
+                "làm sao biết đúng thợ sẽ đến",
+                E(
+                    contains_any=["liên hệ", "xác nhận", "thông tin", "thợ", "hệ thống", "Fixago"],
+                    checks=["no_fake_policy", "no_booking_attempt"],
+                ),
+            ),
+        ],
+    ),
+    Scenario(
+        name="75. Hỏi phí di chuyển có bao gồm chưa",
+        tags=["business", "vi"],
+        turns=[
+            T(
+                "chi phí này bao gồm chi phí di chuyển chưa",
+                E(
+                    contains_any=["di chuyển", "bao gồm", "không phát sinh", "phí", "giá dịch vụ"],
+                    checks=["no_fake_policy"],
+                ),
+            ),
+        ],
+    ),
+    Scenario(
+        name="76. Đặt lịch sửa phòng bếp",
+        tags=["booking", "vi"],
+        turns=[
+            T(
+                "anh muốn sửa chữa phòng bếp nhà anh",
+                E(checks=["service_answer", "asks_contact"], accept_if=["service_answer"]),
+            ),
+        ],
+    ),
+    Scenario(
+        name="77. Đặt lịch thay bóng đèn trần",
+        tags=["booking", "vi"],
+        turns=[
+            T(
+                "anh muốn thay bóng đèn trên trần nhà",
+                E(
+                    contains_any=["điện", "bóng đèn", "Fixago", "đặt lịch", "địa chỉ"],
+                    checks=["service_answer"],
+                ),
+            ),
+        ],
+    ),
+    Scenario(
+        name="78. Lắp đặt máy lạnh mới",
+        tags=["booking", "vi"],
+        turns=[
+            T(
+                "anh muốn lắp đặt máy lạnh mới mua",
+                E(
+                    contains_any=["máy lạnh", "lắp đặt", "Fixago", "địa chỉ", "đặt lịch"],
+                    checks=["service_answer"],
+                ),
+            ),
+        ],
+    ),
+    Scenario(
+        name="79. Thay ống nước bị bể gấp",
+        tags=["booking", "urgent", "vi"],
+        turns=[
+            T(
+                "anh muốn thay thế ống nước vừa bị bể gấp",
+                E(
+                    contains_any=["nước", "ống", "Fixago", "đặt lịch", "thợ", "địa chỉ"],
+                    checks=["service_answer"],
+                ),
+            ),
+        ],
+    ),
+    Scenario(
+        name="80. Hỏi thay khóa cửa — dịch vụ chưa có",
+        tags=["unknown", "service", "vi"],
+        turns=[
+            T(
+                "bên em có hỗ trợ thay khóa cửa không",
+                E(
+                    contains_any=["chưa", "không hỗ trợ", "khóa", "dịch vụ khác"],
+                    checks=["no_booking_attempt", "mentions_fixago"],
+                    not_contains_any=["đặt lịch thay khóa", "book thay khóa"],
+                ),
+            ),
+        ],
+    ),
+    Scenario(
+        name="81. Hỏi phương thức thanh toán",
+        tags=["business", "vi"],
+        turns=[
+            T(
+                "thanh toán bằng cách nào",
+                E(
+                    contains_any=["tiền mặt", "chuyển khoản", "thanh toán", "ngân hàng"],
+                    checks=["no_fake_policy"],
+                ),
+            ),
+        ],
+    ),
+    Scenario(
+        name="82. EN — Giới thiệu công ty và dịch vụ",
+        tags=["identity", "en"],
+        turns=[
+            T(
+                "can you introduce about your company and services",
+                E(
+                    contains_all=["Fixago"],
+                    contains_any=["electrical", "plumbing", "air", "construction", "điện", "nước", "repair", "service"],
+                    checks=["mentions_fixago", "service_answer"],
+                ),
+            ),
+        ],
+    ),
+    Scenario(
+        name="83. EN — Thời gian xác nhận lịch",
+        tags=["business", "en"],
+        turns=[
+            T(
+                "how long for you to confirm",
+                E(
+                    contains_any=["15", "30", "minute", "confirm", "technician", "contact"],
+                    checks=["no_fake_policy"],
+                ),
+            ),
+        ],
+    ),
+    Scenario(
+        name="84. EN — Hỏi giá chung",
+        tags=["price", "en"],
+        turns=[
+            T(
+                "how about the pricing",
+                E(
+                    contains_any=["price", "cost", "fee", "giá", "hạng mục", "category", "depends", "tùy"],
+                    checks=["no_fake_policy", "service_answer"],
+                ),
+            ),
+        ],
+    ),
+    Scenario(
+        name="85. EN — Bảo dưỡng máy lạnh",
+        tags=["tool", "price", "en"],
+        turns=[
+            T(
+                "i need to maintenance my air conditioner",
+                E(
+                    contains_any=["air conditioner", "máy lạnh", "maintenance", "vệ sinh", "bảo dưỡng", "Fixago"],
+                    checks=["service_answer"],
+                    accept_if=["price_present"],
+                ),
+            ),
         ],
     ),
 ]

@@ -1,10 +1,3 @@
-# Fixago tool call grammar — constrains model output to either:
-#   1. A CALL_TOOL directive (for tool dispatch)
-#   2. A plain text response (Vietnamese assistant reply)
-#
-# Use with: cheese-server --grammar grammars/fixago_tool_call.gbnf
-# NOTE: This is for legacy mode only. Native --jinja mode is preferred.
-
 root ::= tool-call | text-response
 
 # ── Tool call directives ────────────────────────────────────────────────────
@@ -13,15 +6,22 @@ tool-call ::= get-groups | get-services | get-promotions | create-booking
 get-groups ::= "CALL_TOOL: get_groups()"
 
 get-services ::= "CALL_TOOL: get_services(search=\"" service-key "\")"
-service-key ::= "điện" | "nước" | "điện lạnh" | "xây dựng" | "thạch cao"
+# Đã sửa thành "máy lạnh" để khớp với logic backend
+service-key ::= "điện" | "nước" | "máy lạnh" | "xây dựng" | "thạch cao"
 
 get-promotions ::= "CALL_TOOL: get_promotions()"
 
-create-booking ::= "CALL_TOOL: create_booking(name=\"" safe-str "\", phone=\"" phone-str "\", address=\"" safe-str "\", description=\"" safe-str "\")"
+# Đã chèn thêm biến 'ws' để LLM thoải mái giãn cách các tham số
+create-booking ::= "CALL_TOOL: create_booking(name=\"" safe-str "\"," ws "phone=\"" phone-str "\"," ws "address=\"" safe-str "\"," ws "description=\"" safe-str "\")"
 
 # ── Primitives ──────────────────────────────────────────────────────────────
-safe-str  ::= [^\"\n\r]{1,200}
+# Khoảng trắng tùy chọn (có hoặc không có đều được)
+ws ::= [ \t]*
+
+# Dùng dấu + thay vì {1,200} để giải phóng sức mạnh CPU
+safe-str  ::= [^\"\n\r]+
 phone-str ::= ("0" | "+84") [0-9]{8,10}
 
-# ── Free-text response (Vietnamese, max ~500 chars) ─────────────────────────
-text-response ::= [^\x00]{1,500}
+# ── Free-text response (Vietnamese) ─────────────────────────────────────────
+# Dùng dấu + thay vì {1,500}, việc giới hạn chiều dài để max_tokens lo
+text-response ::= [^\x00]+

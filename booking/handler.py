@@ -28,20 +28,19 @@ BACKEND_URL = os.environ.get("BACKEND_API_URL", "http://127.0.0.1:3001/api/v1")
 # ── Service keyword → search term normalization ───────────────────────────────
 
 def normalize_service_search(raw: str) -> str:
-    """Map a free-form description to a canonical backend search keyword."""
+    """Map a free-form description to a canonical backend search keyword.
+    Simplified: only match very clear signals. Ambiguous cases → pass to backend."""
     s = (raw or "").strip().lower()
-    if any(k in s for k in ["máy lạnh", "điều hòa", "tủ lạnh", "gas", "không lạnh", "lạnh", "điện lạnh"]):
+    if any(k in s for k in ["máy lạnh", "điều hòa", "không lạnh"]):
         return "máy lạnh"
-    if any(k in s for k in ["điện", "chập", "ổ cắm", "bóng đèn", "công tắc", "tủ điện", "aptomat", "cb", "dây điện"]):
+    if any(k in s for k in ["điện", "ổ cắm", "công tắc"]):
         return "điện"
-    if any(k in s for k in ["nước", "ống", "bơm", "van", "bồn", "vòi", "nghẹt", "rò", "lavabo", "thoát nước"]):
+    if any(k in s for k in ["nước", "ống", "rò"]):
         return "nước"
-    if any(k in s for k in ["giặt", "máy giặt"]):
-        return "máy giặt"
-    if any(k in s for k in ["sơn", "chống thấm", "ốp lát", "tường", "ban công", "xây", "trát", "dột", "bê tông"]):
-        return "xây dựng"
-    if any(k in s for k in ["thạch cao", "trần", "vách ngăn"]):
+    if any(k in s for k in ["thạch cao", "trần"]):
         return "thạch cao"
+    if any(k in s for k in ["sơn", "xây dựng"]):
+        return "xây dựng"
     return raw.strip()
 
 
@@ -112,10 +111,14 @@ def build_booking_response(query: str, history: List[Dict]) -> Optional[str]:
         # Inherit intent from history if:
         # 1. Recent assistant message asked for contact info (mid-booking), OR
         # 2. A recent user turn had booking intent AND current query has contact-like data
-        _ASK_CONTACT_HINTS = ["họ tên", "số điện thoại", "địa chỉ cần sửa",
-                               "xin họ tên", "xin thêm"]
-        _BOOKING_INVITE_HINTS = ["hỗ trợ đặt lịch", "đặt lịch không", "want to book",
-                                  "would you like", "xác nhận đặt lịch"]
+        _ASK_CONTACT_HINTS = [
+            "họ tên", "số điện thoại", "địa chỉ cần sửa", "xin họ tên", "xin thêm",
+            "name", "phone", "address", "share your", "please provide"
+        ]
+        _BOOKING_INVITE_HINTS = [
+            "hỗ trợ đặt lịch", "đặt lịch không", "xác nhận đặt lịch",
+            "want to book", "would you like", "can i book", "book", "send someone"
+        ]
         from booking.extractor import extract_booking_from_text as _ex
         _cur = _ex(query)
         _has_contact_data = bool(_cur.get("phone") or _cur.get("name") or _cur.get("address"))
@@ -165,12 +168,18 @@ def build_booking_response(query: str, history: List[Dict]) -> Optional[str]:
         )
 
     # All info present but not confirmed yet — show summary
+    # Recap the extracted info clearly so user can verify and modify if needed
+    issue_line = info.get('issue', 'Khách hàng yêu cầu kiểm tra')
+    if issue_line and len(issue_line) > 100:
+        issue_line = issue_line[:100] + "..."
+
     return (
-        f"Tên: {info['name']}\n"
-        f"SĐT: {info['phone']}\n"
-        f"Địa chỉ: {info['address']}\n"
-        f"Vấn đề: {info.get('issue', '')}\n"
-        "Bạn xác nhận đặt lịch với thông tin này nhé?"
+        f"Dạ mình ghi nhận thông tin:\n"
+        f"• Tên: {info['name']}\n"
+        f"• SĐT: {info['phone']}\n"
+        f"• Địa chỉ: {info['address']}\n"
+        f"• Vấn đề: {issue_line}\n\n"
+        "Anh/chị xác nhận đặt lịch với thông tin này nhé?"
     )
 
 

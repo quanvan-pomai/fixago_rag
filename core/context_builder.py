@@ -52,7 +52,7 @@ class ContextBuilder:
         instruction = (policy.llm_instruction or "").strip()
         system = f"{base}\n\n[HƯỚNG DẪN PHẢN HỒI]: {instruction}" if instruction else base
 
-        compacted = compact_history(history, max_items=6)
+        compacted = compact_history(history, max_items=3)
         messages = [{"role": "system", "content": system}]
         messages.extend(compacted)
 
@@ -61,7 +61,7 @@ class ContextBuilder:
 
         if data_block:
             user_content = (
-                f"[DỮ LIỆU HỆ THỐNG — chỉ dùng thông tin này để trả lời, không bịa thêm]\n"
+                f"[DỮ LIỆU HỆ THỐNG]\n"
                 f"{data_block}\n"
                 f"[/DỮ LIỆU]\n\n"
             )

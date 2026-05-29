@@ -173,14 +173,34 @@ def fetch_raw_services(search_arg: str) -> FetchResult:
     try:
         if search_arg == "all":
             all_services: List[Dict] = []
-            for keyword in ["điện", "nước", "máy lạnh", "xây dựng"]:
-                resp = requests.get(
-                    f"{BACKEND_URL}/services",
-                    params={"search": keyword, "limit": 3, "isActive": True},
-                    timeout=3,
-                )
-                if resp.status_code == 200:
-                    all_services.extend(resp.json().get("data", []))
+            try:
+                grp_resp = requests.get(f"{BACKEND_URL}/services/groups", timeout=3)
+                if grp_resp.status_code == 200:
+                    groups = grp_resp.json() or []
+                    for g in groups:
+                        keyword = g.get("name", "").lower()
+                        if keyword:
+                            resp = requests.get(
+                                f"{BACKEND_URL}/services",
+                                params={"search": keyword, "limit": 2, "isActive": True},
+                                timeout=3,
+                            )
+                            if resp.status_code == 200:
+                                all_services.extend(resp.json().get("data", []))
+            except Exception:
+                pass
+            if not all_services:
+                for keyword in ["điện", "nước", "máy lạnh", "xây dựng", "thạch cao"]:
+                    try:
+                        resp = requests.get(
+                            f"{BACKEND_URL}/services",
+                            params={"search": keyword, "limit": 2, "isActive": True},
+                            timeout=3,
+                        )
+                        if resp.status_code == 200:
+                            all_services.extend(resp.json().get("data", []))
+                    except Exception:
+                        pass
             _cache_set(cache_key, all_services, _SVC_TTL_MS)
             r = FetchResult(ok=True, data=all_services)
             _audit("get_services", r, cache_hit=False, t0=t0)
@@ -392,22 +412,17 @@ def format_promotions_for_llm(promos: List[Dict]) -> str:
 # ── Tool handlers ─────────────────────────────────────────────────────────────
 
 def handle_get_groups(messages: List[Dict], used_tools: List[str]) -> str:
-    used_tools.append("Thực thi Tool [Backend API]: Lấy danh sách nhóm dịch vụ (GET /services/groups)...")
-
-    try:
-        resp = requests.get(f"{BACKEND_URL}/services/groups", timeout=3)
-        if resp.status_code == 200:
-            groups = resp.json()  # plain array
-            if groups:
-                names = [g.get("name", "") for g in groups if g.get("name")]
-                group_list = ", ".join(names)
-                return (
-                    f"Dạ Fixago cung cấp các dịch vụ sửa chữa tại nhà gồm: {group_list}. "
-                    "Bạn đang cần hỗ trợ hạng mục nào để mình tư vấn thêm nhé?"
-                )
-    except Exception as exc:
-        logger.warning("handle_get_groups backend error: %s", exc)
-
+    """Delegate to cached fetch_raw_groups rather than hitting backend directly."""
+    result = fetch_raw_groups()
+    if result.ok and result.data:
+        groups = result.data
+        names = [g.get("name", "") for g in groups if g.get("name")]
+        if names:
+            group_list = ", ".join(names)
+            return (
+                f"Dạ Fixago cung cấp các dịch vụ sửa chữa tại nhà gồm: {group_list}. "
+                "Bạn đang cần hỗ trợ hạng mục nào để mình tư vấn thêm nhé?"
+            )
     # Fallback: static answer
     return (
         "Dạ Fixago cung cấp các dịch vụ sửa chữa tại nhà gồm: Điện, Nước, Điện lạnh, "

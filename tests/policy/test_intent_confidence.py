@@ -1,67 +1,54 @@
-"""tests/policy/test_intent_confidence.py — classify_intent() confidence scoring tests."""
+"""
+tests/policy/test_intent_confidence.py — classify_intent() tests.
+
+Phase 7: classify_intent() is a stub returning LOW confidence + no tool.
+Service routing is delegated to the LLM via native tool calling.
+Tests updated to reflect the new semantic architecture.
+"""
 import pytest
-from core.intent_result import Confidence
+from core.intent_result import Confidence, IntentResult
 from core.intent_router import classify_intent
 
 
-def test_specific_service_query_high_confidence():
+def test_classify_intent_returns_intent_result():
+    """classify_intent() always returns an IntentResult."""
     r = classify_intent("Sửa chập điện bao nhiêu?")
-    assert r.tool_call_str is not None
-    assert "get_services" in r.tool_call_str
-    assert r.confidence == Confidence.HIGH
+    assert isinstance(r, IntentResult)
 
 
-def test_generic_price_query_medium_confidence():
-    r = classify_intent("Giá dịch vụ bên bạn thế nào?")
-    assert r.confidence == Confidence.MEDIUM
-    assert r.ambiguity_reason is not None
+def test_classify_intent_no_tool_stub():
+    """Phase 7: stub returns no tool — LLM handles routing semantically."""
+    r = classify_intent("Sửa chập điện bao nhiêu?")
+    assert r.tool_call_str is None
 
 
-def test_bao_gia_medium_confidence():
-    r = classify_intent("Bảng giá bên bạn như thế nào?")
-    assert r.confidence == Confidence.MEDIUM
-
-
-def test_machine_cold_high_confidence():
+def test_classify_intent_semantic_routing_reason():
+    """ambiguity_reason indicates semantic routing is active."""
     r = classify_intent("Máy lạnh không mát sửa bao nhiêu?")
-    assert r.confidence == Confidence.HIGH
-    assert r.tool_call_str is not None
-    assert '"máy lạnh"' in r.tool_call_str
+    assert r.ambiguity_reason == "semantic_routing_by_llm"
 
 
-def test_groups_query_high_confidence():
+def test_classify_intent_confidence_low():
+    """Stub confidence is LOW — policy engine defaults to GENERAL_FIXAGO_QA."""
     r = classify_intent("Fixago có dịch vụ gì?")
-    assert r.confidence == Confidence.HIGH
-    assert r.tool_call_str is not None
-    assert "get_groups" in r.tool_call_str
-    assert "list_services_keyword" in r.matched_signals
-
-
-def test_confirmation_no_tool():
-    r = classify_intent("Xác nhận")
-    assert r.tool_call_str is None
-    assert r.confidence == Confidence.HIGH
-
-
-def test_promotions_keyword():
-    r = classify_intent("Có khuyến mãi không?")
-    assert "get_promotions" in (r.tool_call_str or "")
-    assert "promotions_keyword" in r.matched_signals
-
-
-def test_empty_query_low_confidence():
-    r = classify_intent("   ")
     assert r.confidence == Confidence.LOW
-    assert r.ambiguity_reason is not None
 
 
-def test_hong_roi_vague():
-    r = classify_intent("Hỏng rồi")
-    # vague damage statement — no specific service keyword, no tool
+def test_classify_intent_empty_query():
+    r = classify_intent("   ")
     assert r.tool_call_str is None
+    assert r.confidence == Confidence.LOW
 
 
-def test_nuoc_specific_high():
-    r = classify_intent("Ống nước bị rò sửa bao nhiêu?")
-    assert r.confidence == Confidence.HIGH
-    assert '"nước"' in (r.tool_call_str or "")
+def test_classify_intent_various_queries_all_stub():
+    """Multiple queries — all return None tool (routing by LLM)."""
+    queries = [
+        "Ống nước bị rò sửa bao nhiêu?",
+        "Có khuyến mãi không?",
+        "Hỏng rồi",
+        "Xác nhận",
+        "Fixago có dịch vụ gì?",
+    ]
+    for q in queries:
+        r = classify_intent(q)
+        assert r.tool_call_str is None, f"Expected None tool for {q!r}, got {r.tool_call_str!r}"

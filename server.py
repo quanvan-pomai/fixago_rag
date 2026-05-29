@@ -3,19 +3,7 @@
 server.py
 ---------
 Flask entry point for the Fixago RAG server.
-All business logic lives in core/ and dedicated modules:
-  core/session.py          — session management
-  core/prompt_builder.py   — system prompt, few-shot, history
-  core/guardrails.py       — injection detection, static fallbacks
-  core/intent_router.py    — tool intent detection
-  core/rag_enrichment.py   — query rewriting for RAG
-  core/output_validator.py — LLM output validation
-  core/query_processor.py  — multi-question splitting, tool data fetching
-  core/orchestrator.py     — orchestration paths + session persistence
-  booking/                 — booking flow
-  tools/handlers.py        — backend API fetch/format
-  llm_client/client.py     — LLM calls
-  db/                      — vector store + cache
+Optimized for ultra-low latency & early cache returns.
 """
 import os
 import uuid
@@ -26,7 +14,7 @@ from flask import Flask, jsonify, request, send_file
 import rag_engine
 from core.cache_policy import make_cache_key, should_cache_response
 from core.guardrails import guardrail_response, is_prompt_injection
-from core.intent_router import classify_intent, detect_tool_intent
+from core.intent_router import detect_user_language
 from core.memory.memory_retriever import MemoryRetriever, format_memory_block
 from core.memory.memory_store import MemoryStore
 from core.memory.memory_writer import get_default_writer
@@ -35,7 +23,7 @@ from core.orchestrator import (
     persist_session, run_legacy_fast_path,
     run_legacy_tool_path, run_native_tool_path,
 )
-from core.policy import policy_for_intent
+from core.policy import PolicyType, ResponsePolicy
 from core.prompt_builder import build_system_prompt, compact_history, load_system_prompt
 from core.rag_enrichment import rewrite_for_rag
 from core.retrieval import should_retrieve_context
@@ -53,8 +41,7 @@ _init_tools_cache(rag_engine.cache)
 _memory_retriever = MemoryRetriever()
 _memory_writer = get_default_writer()
 
-# Set ENABLE_NATIVE_TOOL_CALL=1 when cheese-server is started with --jinja.
-ENABLE_NATIVE_TOOL_CALL = os.environ.get("ENABLE_NATIVE_TOOL_CALL", "0") in ("1", "true", "yes")
+ENABLE_NATIVE_TOOL_CALL = os.environ.get("ENABLE_NATIVE_TOOL_CALL", "1") in ("1", "true", "yes")
 
 app = Flask(__name__)
 
@@ -128,6 +115,18 @@ def memory_debug():
     })
 
 
+@app.route("/api/v1/admin/reload-prompt", methods=["POST"])
+def reload_prompt():
+    if os.environ.get("FIXAGO_DEBUG") != "1":
+        return jsonify({"status": "error", "message": "Not found"}), 404
+    expected = os.environ.get("FIXAGO_ADMIN_TOKEN", "")
+    if not expected or request.headers.get("X-Admin-Token") != expected:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    from core.prompt_builder import reload_system_prompt
+    new_prompt = reload_system_prompt()
+    return jsonify({"status": "success", "prompt_length": len(new_prompt)})
+
+
 @app.route("/api/v1/rag/query", methods=["POST"])
 def query_rag():
     data       = request.json or {}
@@ -155,13 +154,13 @@ def query_rag():
         set_current_trace_id(trace.trace_id)
 
         session  = SessionManager.get(session_id)
-        client_h = compact_history(data.get("history", []))
+        client_h = compact_history(data.get("history", []), max_items=5)
         if client_h and not session.get("history"):
             session["history"] = client_h
         history = session.get("history", [])
 
-        # ── Prefetch service catalog once per session ─────────────────────────
-        if not session.get("catalog_prefetched"):
+        # ── OPTIMIZATION 1: Skip Catalog Prefetch for Native Mode ────────────
+        if not ENABLE_NATIVE_TOOL_CALL and not session.get("catalog_prefetched"):
             try:
                 _grps = fetch_raw_groups()
                 if _grps.ok and _grps.data:
@@ -171,88 +170,38 @@ def query_rag():
                 pass
 
         # ── System prompt ─────────────────────────────────────────────────────
-        base_prompt    = load_system_prompt()
-        _early_intent  = detect_tool_intent(query)
-        _intent_result = classify_intent(query)
-        _policy        = policy_for_intent(_intent_result, query)
-        trace.detected_intent   = _early_intent or ""
-        trace.intent_confidence = _intent_result.confidence.value
+        # detect_tool_intent / classify_intent are stubs (return None / LOW).
+        # policy always falls through to GENERAL_FIXAGO_QA — skip the call.
+        base_prompt = load_system_prompt()
+        _policy     = ResponsePolicy(
+            policy_type=PolicyType.GENERAL_FIXAGO_QA,
+            should_cache=True,
+            retrieve_rag=True,
+            temperature=0.2,
+        )
+        trace.detected_intent   = ""
+        trace.intent_confidence = "low"
         trace.policy_type       = _policy.policy_type.value
-        memory_result = _memory_retriever.retrieve(
-            query=query,
-            policy=_policy,
-            session_id=session_id,
-            user_id=user_id,
-        )
-        trace.memory_retrieval_enabled = memory_result.enabled
-        trace.memory_entries_selected_count = len(memory_result.entries)
-        trace.memory_scopes_used = sorted({m.entry.scope.value for m in memory_result.entries})
-        trace.memory_token_budget_used = memory_result.token_budget_used
-        memory_block = format_memory_block(memory_result.entries)
-        _catalog       = session.get("catalog_summary", "")
-        system         = build_system_prompt(
+
+        _catalog = session.get("catalog_summary", "") if not ENABLE_NATIVE_TOOL_CALL else ""
+        system   = build_system_prompt(
             base_prompt, session.get("booking_state", {}),
-            ENABLE_NATIVE_TOOL_CALL, _early_intent, _catalog,
+            ENABLE_NATIVE_TOOL_CALL, None, _catalog,
         )
 
-        # ── Fast path ─────────────────────────────────────────────────────────
-        used_tools: list = []
-        if not ENABLE_NATIVE_TOOL_CALL and not use_cache:
-            fast_messages = [{"role": "system", "content": system}]
-            fast_messages.extend(compact_history(history, max_items=6))
-            fast_messages.append({"role": "user", "content": query})
-            fast_answer = run_legacy_fast_path(query, history, fast_messages, used_tools)
-            if fast_answer is not None:
-                persist_session(session_id, session, query, fast_answer)
-                trace.memory_write_count = _memory_writer.update_after_turn(
-                    query=query,
-                    response=fast_answer,
-                    tool_calls=used_tools,
-                    session=session,
-                    session_id=session_id,
-                    user_id=user_id,
-                    trace_id=trace.trace_id,
-                )
-                trace.memory_write_rejected_reason = _memory_writer.last_rejected_reason
-                trace.path = "static_fallback"
-                trace.tools_called = used_tools
-                trace.emit()
-                return jsonify({
-                    "status": "success",
-                    "session_id": session_id,
-                    "response": fast_answer,
-                    "source": "llm",
-                    "tool_calls": used_tools,
-                    "cache_metrics": {"hit": False, "cached_tokens": 0, "savings_ratio": 0.0},
-                })
-
-        # ── RAG context ───────────────────────────────────────────────────────
-        rag_context = ""
-        _do_rag     = should_retrieve_context(query, _intent_result, _policy)
-        trace.retrieve_context = _do_rag
-        if _do_rag:
-            try:
-                _rewritten  = rewrite_for_rag(query, _early_intent)
-                rag_context = rag_engine.retrieve_context(
-                    rag_engine.normalize_query(_rewritten),
-                    top_k=2,
-                    max_len=2000,
-                )
-            except Exception as exc:
-                print(f"RAG retrieval failed: {exc}")
-
-        # ── Cache key ─────────────────────────────────────────────────────────
+        # ── OPTIMIZATION 2: Early Cache Check (Before DB calls) ──────────────
         history_text = "\n".join(
             f"{m.get('role')}: {m.get('content', '')}"
-            for m in compact_history(history)
+            for m in compact_history(history, max_items=5)
         )
         tokens    = []
         cache_key = ""
-
         _use_cache_this_req = use_cache and should_cache_response(_policy, trace.backend_ok)
+
         if _use_cache_this_req:
             try:
-                cache_key = make_cache_key(system, history_text, "", rag_context, query)
+                # Pass "" to rag_context to look up instantly without waiting for RAG
+                cache_key = make_cache_key(system, history_text, "", "", query)
                 tokens    = rag_engine.tokenize_text(cache_key)
                 cached    = rag_engine.cache.get(cache_key)
                 p_res     = rag_engine.cache.prompt_get(tokens) if cached else None
@@ -273,21 +222,78 @@ def query_rag():
             except Exception as exc:
                 print(f"Cache lookup failed: {exc}")
 
-        # ── Build messages ────────────────────────────────────────────────────
+        # ── Fast path (Legacy Only) ──────────────────────────────────────────
+        used_tools: list = []
+        if not ENABLE_NATIVE_TOOL_CALL and not use_cache:
+            fast_messages = [{"role": "system", "content": system}]
+            fast_messages.extend(compact_history(history, max_items=5))
+            fast_messages.append({"role": "user", "content": query})
+            fast_answer = run_legacy_fast_path(query, history, fast_messages, used_tools)
+            if fast_answer is not None:
+                persist_session(session_id, session, query, fast_answer)
+                trace.path = "static_fallback"
+                trace.tools_called = used_tools
+                trace.emit()
+                return jsonify({
+                    "status": "success",
+                    "session_id": session_id,
+                    "response": fast_answer,
+                    "source": "llm",
+                    "tool_calls": used_tools,
+                    "cache_metrics": {"hit": False, "cached_tokens": 0, "savings_ratio": 0.0},
+                })
+
+        # ── Memory Retrieval (Deferred until Cache Miss) ──────────────────────
+        memory_result = _memory_retriever.retrieve(
+            query=query,
+            policy=_policy,
+            session_id=session_id,
+            user_id=user_id,
+        )
+        trace.memory_retrieval_enabled = memory_result.enabled
+        trace.memory_entries_selected_count = len(memory_result.entries)
+        trace.memory_scopes_used = sorted({m.entry.scope.value for m in memory_result.entries})
+        trace.memory_token_budget_used = memory_result.token_budget_used
+        memory_block = format_memory_block(memory_result.entries)
+
+        # ── RAG context (Deferred until Cache Miss) ───────────────────────────
+        rag_context = ""
+        _do_rag = should_retrieve_context(
+            query,
+            tool_name=None,
+            booking_state=session.get("booking_state", {}),
+        )
+        trace.retrieve_context = _do_rag
+        if _do_rag:
+            try:
+                _rewritten  = rewrite_for_rag(query, None)
+                rag_context = rag_engine.retrieve_context(
+                    rag_engine.normalize_query(_rewritten),
+                    top_k=2,
+                    max_len=2000,
+                )
+            except Exception as exc:
+                print(f"RAG retrieval failed: {exc}")
+
+        # ── Build LLM messages ────────────────────────────────────────────────
         messages = [{"role": "system", "content": system}]
-        messages.extend(compact_history(history, max_items=6))
+        messages.extend(compact_history(history, max_items=5))
+        
         context_parts = []
         if memory_block:
             context_parts.append(memory_block)
         if rag_context:
             context_parts.append(f"Ngữ cảnh tham khảo:\n{rag_context}")
+        
         context_prefix = "\n\n".join(context_parts)
+        user_msg_content = f"{context_prefix}\n\nCâu hỏi của khách:\n{query}" if context_prefix else query
+        
         messages.append({
             "role": "user",
-            "content": f"{context_prefix}\n\nCâu hỏi của khách:\n{query}" if context_prefix else query,
+            "content": user_msg_content.strip(),
         })
 
-        # ── Orchestrate ───────────────────────────────────────────────────────
+        # ── Orchestrate LLM Call ──────────────────────────────────────────────
         answer = (
             run_native_tool_path(query, history, messages, used_tools)
             if ENABLE_NATIVE_TOOL_CALL
@@ -297,7 +303,7 @@ def query_rag():
         trace.tools_called = used_tools
         trace.llm_called = True
 
-        # ── Persist session ───────────────────────────────────────────────────
+        # ── Persist session & Save Memory ─────────────────────────────────────
         persist_session(session_id, session, query, answer)
         trace.memory_write_count = _memory_writer.update_after_turn(
             query=query,
@@ -313,9 +319,6 @@ def query_rag():
         # ── Write cache ───────────────────────────────────────────────────────
         if _use_cache_this_req:
             try:
-                if not cache_key:
-                    cache_key = make_cache_key(system, history_text, "", rag_context, query)
-                    tokens    = rag_engine.tokenize_text(cache_key)
                 rag_engine.cache.set(cache_key, answer.encode("utf-8"), ttl_ms=600_000)
                 rag_engine.cache.prompt_put(tokens, answer.encode("utf-8"), ttl_ms=600_000)
             except Exception as exc:
@@ -336,9 +339,7 @@ def query_rag():
         trace.emit()
         return jsonify({"status": "error", "message": f"LLM query failed: {exc}"}), 500
 
-
 # ── Entry point ───────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     port = int(os.environ.get("RAG_PORT", 8081))
     print(f"Starting RAG server on port {port}...")

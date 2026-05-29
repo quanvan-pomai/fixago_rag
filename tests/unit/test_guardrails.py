@@ -1,9 +1,18 @@
-"""Unit tests for core/guardrails.py — no external deps."""
+"""
+Unit tests for core/guardrails.py — no external deps.
+
+Phase 7: static_fallback() handles only 3 deterministic cases:
+  1. Prompt injection
+  2. Greeting / identity → Fixie greeting
+  3. Area / coverage question → service area string
+
+Hours, off-topic, safety, FAQ are now handled by LLM via system prompt rules.
+"""
 import os
 os.environ.setdefault("FIXAGO_TEST_MODE", "1")
 
 import pytest
-from core.guardrails import is_prompt_injection, static_fallback, guardrail_response
+from core.guardrails import is_prompt_injection, static_fallback, guardrail_response, is_greeting_or_identity, is_area_question
 
 
 # ── Prompt injection detection ────────────────────────────────────────────────
@@ -32,79 +41,76 @@ def test_injection_not_detected(query):
     assert not is_prompt_injection(query), f"False positive for: {query!r}"
 
 
-# ── static_fallback ───────────────────────────────────────────────────────────
+# ── Greeting / identity fast-path ────────────────────────────────────────────
 
-def test_offtopic_nau_pho():
-    result = static_fallback("Bạn chỉ tôi cách nấu phở bò ngon đi")
-    assert result, "Expected non-empty fallback for off-topic"
-    assert "fixago" in result.lower() or "sửa" in result.lower()
-
-
-def test_offtopic_poem():
-    result = static_fallback("Viết thơ tình cho tôi")
-    assert result, "Expected non-empty fallback for off-topic poem"
+@pytest.mark.parametrize("query", [
+    "xin chào",
+    "hello",
+    "hi fixie",
+    "bạn là ai",
+    "fixie là ai",
+    "giới thiệu bản thân",
+])
+def test_greeting_detected(query):
+    assert is_greeting_or_identity(query), f"Expected greeting for: {query!r}"
 
 
 @pytest.mark.parametrize("query", [
-    "fixago co ban nuoc mia khong?",
-    "có bán nước mía không",
-    "bên bạn có bán đồ uống không",
+    "xin chào, giá sửa điện bao nhiêu?",   # has service keyword
+    "sửa ổ cắm bao nhiêu",
+    "Fixago có dịch vụ gì?",
 ])
-def test_offtopic_product_sales(query):
+def test_greeting_not_detected_with_service(query):
+    assert not is_greeting_or_identity(query), f"False positive for: {query!r}"
+
+
+def test_static_fallback_returns_fixie_greeting():
+    result = static_fallback("xin chào")
+    assert "Fixie" in result
+    assert "Fixago" in result
+
+
+def test_static_fallback_returns_fixie_greeting_identity():
+    result = static_fallback("bạn là ai?")
+    assert "Fixie" in result
+
+
+# ── Area / coverage fast-path ─────────────────────────────────────────────────
+
+@pytest.mark.parametrize("query", [
+    "Fixago phục vụ khu vực nào?",
+    "fixago ở đâu",
+    "Fixago có phục vụ quận 2 không?",
+    "bên Fixago có hỗ trợ Thủ Đức không?",
+    "tphcm có hỗ trợ không",
+])
+def test_area_question_detected(query):
+    assert is_area_question(query), f"Expected area for: {query!r}"
+
+
+def test_static_fallback_returns_area_info():
+    result = static_fallback("Fixago phục vụ khu vực nào?")
+    assert "Quận 2" in result
+    assert "Thủ Đức" in result
+
+
+# ── Pass-through cases (LLM handles these now) ────────────────────────────────
+
+@pytest.mark.parametrize("query", [
+    "Sửa ổ cắm bao nhiêu?",
+    "Tôi muốn đặt thợ sửa điện",
+    "Giờ làm việc bên bạn thế nào?",        # hours → LLM
+    "Ổ điện tóe lửa phải làm sao?",          # safety → LLM
+    "Nhà tôi bị rò gas rất nguy hiểm",       # safety → LLM
+    "Bạn chỉ tôi cách nấu phở bò ngon đi",   # off-topic → LLM
+    "fixago co ban nuoc mia khong?",          # off-topic → LLM
+    "có bán nước mía không",                  # off-topic → LLM
+    "bên bạn có bán đồ uống không",           # off-topic → LLM
+])
+def test_passthrough_to_llm(query):
+    """These queries are no longer intercepted — LLM handles via system prompt rules."""
     result = static_fallback(query)
-    assert result, "Expected product sales to be handled statically"
-    assert "không bán" in result.lower()
-    assert "sửa chữa" in result.lower()
-    assert "máy lạnh" in result.lower()
-
-
-def test_hours_fallback():
-    result = static_fallback("Giờ làm việc bên bạn thế nào?")
-    assert result, "Expected non-empty fallback for hours question"
-    assert "24/7" in result
-
-
-def test_hours_with_service_passes_through():
-    """If the query also asks about services, hours fallback should NOT fire."""
-    result = static_fallback("Giờ làm việc và dịch vụ gì?")
-    assert result == "", f"Expected empty string (pass through), got {result!r}"
-
-
-def test_hours_with_promotion_passes_through():
-    result = static_fallback("Giờ làm và có khuyến mãi gì không?")
-    assert result == ""
-
-
-def test_safety_toe_lua():
-    result = static_fallback("Ổ điện tóe lửa phải làm sao?")
-    assert result
-    assert "nguy hiểm" in result or "Fixago" in result or "ngắt" in result
-
-
-def test_safety_ro_gas():
-    result = static_fallback("Nhà tôi bị rò gas rất nguy hiểm")
-    assert result
-    assert "gas" in result.lower() or "nguy hiểm" in result.lower()
-
-
-def test_no_fallback_for_price_query():
-    """Normal price query with no dangerous keyword should pass through."""
-    result = static_fallback("Sửa ổ cắm bao nhiêu?")
-    assert result == ""
-
-
-def test_electric_emergency_fallback():
-    """'Chập điện' triggers safety fallback even with price question."""
-    result = static_fallback("Sửa chập điện bao nhiêu?")
-    # guardrail fires: either safety or tool path; either way not empty
-    # (the price question still gets answered via the tool path after this in practice)
-    # This is correct behaviour — verify it returns a safety nudge or ""
-    assert isinstance(result, str)
-
-
-def test_no_fallback_for_booking_query():
-    result = static_fallback("Tôi muốn đặt thợ sửa điện")
-    assert result == ""
+    assert result == "", f"Expected empty (pass-through) for {query!r}, got {result!r}"
 
 
 # ── guardrail_response ────────────────────────────────────────────────────────

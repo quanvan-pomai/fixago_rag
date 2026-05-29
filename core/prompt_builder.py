@@ -2,75 +2,45 @@
 core/prompt_builder.py
 System prompt loading, dynamic few-shot injection, and history compaction.
 """
+import json
 import os
 import re
+from typing import Optional
 
-_INTENT_SHOTS: dict[str | None, list[str]] = {
-    "get_groups": [
-        "Q: Fixago có dịch vụ gì?\nA: CALL_TOOL: get_groups()",
-        "Q: Bên bạn làm được gì?\nA: CALL_TOOL: get_groups()",
-    ],
-    "get_promotions": [
-        "Q: Có khuyến mãi gì không?\nA: CALL_TOOL: get_promotions()",
-        "Q: Có mã giảm giá không?\nA: CALL_TOOL: get_promotions()",
-    ],
-    "get_services_nước": [
-        "Q: Sửa ống nước giá bao nhiêu?\nA: CALL_TOOL: get_services(search=\"nước\")",
-        "Q: Nước rỉ dưới bồn rửa sửa bao nhiêu?\nA: CALL_TOOL: get_services(search=\"nước\")",
-    ],
-    "get_services_điện": [
-        "Q: Sửa chập điện bao nhiêu?\nA: CALL_TOOL: get_services(search=\"điện\")",
-        "Q: Điện hay nhảy cầu dao, chi phí thế nào?\nA: CALL_TOOL: get_services(search=\"điện\")",
-    ],
-    "get_services_máy lạnh": [
-        "Q: Điều hòa không mát giá bao nhiêu?\nA: CALL_TOOL: get_services(search=\"máy lạnh\")",
-        "Q: Máy lạnh nhỏ giọt nước thì sửa bao nhiêu?\nA: CALL_TOOL: get_services(search=\"máy lạnh\")",
-    ],
-    "get_services_xây dựng": [
-        "Q: Chống thấm tường giá bao nhiêu?\nA: CALL_TOOL: get_services(search=\"xây dựng\")",
-    ],
-    "get_services_thạch cao": [
-        "Q: Làm trần thạch cao giá bao nhiêu?\nA: CALL_TOOL: get_services(search=\"thạch cao\")",
-    ],
-    "booking": [
-        "Q: Tôi muốn đặt thợ sửa điện\nA: Dạ mình hỗ trợ bạn đặt lịch được ạ. Bạn cho mình xin họ tên, số điện thoại và địa chỉ cần sửa nhé.",
-        "Q: ok đặt đi\nA: CALL_TOOL: create_booking(name=\"...\", phone=\"...\", address=\"...\", description=\"...\")",
-    ],
-    None: [
-        "Q: Fixago có dịch vụ gì?\nA: CALL_TOOL: get_groups()",
-        "Q: Tôi muốn đặt thợ\nA: Dạ mình hỗ trợ bạn đặt lịch được ạ. Bạn cho mình xin họ tên, số điện thoại và địa chỉ cần sửa nhé.",
-    ],
-}
+_UNIVERSAL_SHOTS = (
+    "Q: Nhà tôi bị mất điện, sửa bao nhiêu?\n"
+    "A: Dạ mất điện thường do cầu dao hoặc hở dây. Giá tham khảo từ 150k. Anh/chị cho xin địa chỉ để đặt thợ nhé?\n\n"
+    "Q: Đặt thợ sửa điều hòa\n"
+    "A: Dạ Fixago hỗ trợ đặt lịch ngay. Anh/chị cho xin họ tên, SĐT và địa chỉ nhé?"
+)
+
+
+_SYSTEM_PROMPT_CACHE: Optional[str] = None
+_FALLBACK_PROMPT = "Bạn là Trợ lý AI của Fixago. Luôn trả lời bằng tiếng Việt, lịch sự, ngắn gọn và hữu ích."
 
 
 def load_system_prompt() -> str:
-    try:
-        path = os.path.join(os.path.dirname(__file__), "..", "system_prompt.txt")
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception:
-        return "Bạn là Trợ lý AI của Fixago. Luôn trả lời bằng tiếng Việt, lịch sự, ngắn gọn và hữu ích."
+    global _SYSTEM_PROMPT_CACHE
+    if _SYSTEM_PROMPT_CACHE is None:
+        try:
+            path = os.path.join(os.path.dirname(__file__), "..", "system_prompt.txt")
+            with open(path, "r", encoding="utf-8") as f:
+                _SYSTEM_PROMPT_CACHE = f.read().strip()
+        except Exception:
+            _SYSTEM_PROMPT_CACHE = _FALLBACK_PROMPT
+    return _SYSTEM_PROMPT_CACHE
 
 
-def select_few_shots(intent: str | None) -> str:
-    """Return 2-3 Q&A examples matched to the detected intent."""
-    if intent is None:
-        key: str | None = None
-    elif "get_groups" in intent:
-        key = "get_groups"
-    elif "get_promotions" in intent:
-        key = "get_promotions"
-    elif "get_services" in intent:
-        m = re.search(r'search="([^"]*)"', intent)
-        svc = m.group(1) if m else ""
-        candidate = f"get_services_{svc}"
-        key = candidate if candidate in _INTENT_SHOTS else "get_services_điện"
-    elif "create_booking" in intent:
-        key = "booking"
-    else:
-        key = None
-    shots = _INTENT_SHOTS.get(key, _INTENT_SHOTS[None])
-    return "\n\nEXAMPLES:\n" + "\n\n".join(shots) + "\n"
+def reload_system_prompt() -> str:
+    """Force re-read from disk. Use in tests or after editing system_prompt.txt."""
+    global _SYSTEM_PROMPT_CACHE
+    _SYSTEM_PROMPT_CACHE = None
+    return load_system_prompt()
+
+
+def select_few_shots(intent=None) -> str:
+    """Return universal structural examples. Intent argument kept for API compatibility."""
+    return "\n\nEXAMPLES:\n" + _UNIVERSAL_SHOTS + "\n"
 
 
 def build_system_prompt(
@@ -99,7 +69,7 @@ def build_system_prompt(
     return base + catalog_line + examples.replace("EXAMPLES:\n", state + "EXAMPLES:\n")
 
 
-def compact_history(history, max_items=8):
+def compact_history(history, max_items=3):
     if not isinstance(history, list):
         return []
     clean = []
@@ -111,5 +81,6 @@ def compact_history(history, max_items=8):
         if role not in ("system", "user", "assistant"):
             role = "user"
         if content:
-            clean.append({"role": role, "content": str(content)})
+            safe_content = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+            clean.append({"role": role, "content": safe_content})
     return clean

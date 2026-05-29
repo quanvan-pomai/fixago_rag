@@ -40,50 +40,30 @@ _MULTI_SERVICE_MAP = {
 
 
 def split_questions(query: str) -> list[str]:
-    """Split a multi-question message into individual sub-questions."""
+    """Split a multi-question message into individual sub-questions.
+    Only split on UNAMBIGUOUS boundaries to avoid over-splitting single issues."""
     raw = (query or "").strip()
     if not raw:
         return [raw]
 
-    # 1. Split on ? or ! followed by next sentence
+    # 1. Split on ? or ! followed by next sentence (most reliable)
     parts = re.split(r'(?<=[?!])\s+(?=[A-ZÀ-Ỹa-zà-ỹ0-9])', raw)
     if len(parts) >= 2 and all(p.strip() for p in parts):
         return [p.strip() for p in parts]
 
-    # 2. Split on transition words
+    # 2. Only split on explicit transition words (very conservative)
     parts = re.split(
-        r'[,;]\s*(?:còn|ngoài ra|thêm nữa|bên cạnh đó|đồng thời)\s+',
+        r'(?:,\s*còn\s+|;\s*ngoài ra\s+)',
         raw, flags=re.IGNORECASE
     )
     if len(parts) >= 2 and all(p.strip() for p in parts):
         return [p.strip() for p in parts]
 
-    # 3. Split on " + "
+    # 3. Split on " + " (often separates topics)
     if " + " in raw:
         parts = [p.strip() for p in raw.split(" + ") if p.strip()]
         if len(parts) >= 2:
             return parts
-
-    # 4. Split on ", " or ";" when each part has a signal
-    for sep in [",", ";"]:
-        sep_parts = [p.strip() for p in raw.split(sep) if p.strip()]
-        if len(sep_parts) >= 2 and len(sep_parts) <= 5:
-            if all(any(s in p.lower() for s in _Q_SIGNALS) for p in sep_parts):
-                return sep_parts
-
-    # 5. Split on " và " for distinct topics
-    and_parts = re.split(r'\s+và\s+', raw, flags=re.IGNORECASE)
-    if len(and_parts) >= 2:
-        parts_lower = [p.lower() for p in and_parts]
-        has_hours_side = any(is_hours_question(p) for p in parts_lower)
-        has_topic_side = any(any(s in p for s in _SERVICE_SIGNALS + _QUESTION_SIGNALS)
-                             for p in parts_lower)
-        if has_hours_side and has_topic_side:
-            return [p.strip() for p in and_parts]
-        a, b = parts_lower[0], parts_lower[-1]
-        if ((any(s in a for s in _SERVICE_SIGNALS) and any(s in b for s in _SERVICE_SIGNALS))
-                or (any(s in a for s in _QUESTION_SIGNALS) and any(s in b for s in _QUESTION_SIGNALS))):
-            return [p.strip() for p in and_parts]
 
     return [raw]
 
@@ -131,23 +111,22 @@ def resolve_tool_data(sub_query: str, used_tools: list) -> str:
 
 def detect_multi_service(query: str, first_tool: str, messages: list, used_tools: list):
     """
-    If query mentions two+ service categories with a clear separator,
-    fetch both data blocks and return a combined string for LLM injection.
-    Returns first_tool unchanged if no multi-service detected.
+    LEGACY PATH ONLY. If query mentions two+ service categories with UNAMBIGUOUS separators,
+    fetch both data blocks. Returns first_tool unchanged if no multi-service detected.
+
+    Native path (ENABLE_NATIVE_TOOL_CALL=1) does NOT use this — LLM handles routing.
     """
     q = normalize_noaccent((query or "").lower())
 
-    _MULTI_SEPARATORS = [
-        " còn ", " và giá ", " với giá ", " or ", " and price",
-        "bao nhiêu,", "bao nhiêu còn", "ngoài ra", "; ",
-        " + ", "cùng với",
+    _UNAMBIGUOUS_SEPARATORS = [
+        " và ", " + ", " tính cả ",
     ]
-    if not any(sep in q for sep in _MULTI_SEPARATORS):
+    if not any(sep in q for sep in _UNAMBIGUOUS_SEPARATORS):
         return first_tool
 
     matched = []
-    for key, kws in _MULTI_SERVICE_MAP.items():
-        if any(kw in q for kw in kws):
+    for key in ["điện", "nước", "máy lạnh", "xây dựng", "thạch cao"]:
+        if key in q:
             matched.append(key)
 
     if len(matched) < 2:
@@ -163,5 +142,4 @@ def detect_multi_service(query: str, first_tool: str, messages: list, used_tools
     if not data_blocks:
         return first_tool
 
-    # Return combined data — caller must pass to _llm_with_injected_data
     return "\n\n---\n".join(data_blocks)

@@ -212,8 +212,7 @@ def detect_booking_intent(query: str) -> bool:
     ]
 
     for k in ["đặt lịch", "đặt thợ", "gọi thợ", "book thợ", "book lịch",
-              "cho thợ đến", "cử thợ", "hẹn thợ", "qua sửa", "đến sửa",
-              "đến kiểm tra", "hỗ trợ đặt"]:
+              "cho thợ đến", "cử thợ", "hẹn thợ", "qua sửa đi"]:
         if k in q:
             # Check if this keyword appears inside a negating context
             idx = q.find(k)

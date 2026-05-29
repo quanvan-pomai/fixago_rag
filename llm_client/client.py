@@ -20,8 +20,9 @@ logger = logging.getLogger("fixago.llm_client")
 
 LLM_URL = os.environ.get("LLM_URL", "http://127.0.0.1:8080/v1/chat/completions")
 
-
-LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))
+# Optimized for 4GB RAM + 2 CPU VPS: reduce default timeouts
+LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "60"))
+LLM_TOOL_TIMEOUT = int(os.environ.get("LLM_TOOL_TIMEOUT", "20"))
 
 
 def llm_chat(
@@ -29,6 +30,7 @@ def llm_chat(
     temperature: float = 0.0,
     timeout: int = None,
     grammar: Optional[str] = None,
+    max_tokens: Optional[int] = None,
 ) -> str:
     """Plain chat completion. Optionally constrain output with a GBNF grammar."""
     if timeout is None:
@@ -38,6 +40,8 @@ def llm_chat(
         "temperature": temperature,
         "stream": False,
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
     if grammar:
         payload["grammar"] = grammar
 
@@ -86,7 +90,7 @@ def _trim_messages(messages: List[Dict]) -> List[Dict]:
 def llm_chat_with_tools(
     messages: List[Dict],
     temperature: float = 0.0,
-    timeout: int = 300,
+    timeout: int = None,
 ) -> Tuple[Optional[str], Any, Dict]:
     """
     Native OpenAI-style function calling (requires cheese-server --jinja).
@@ -101,7 +105,7 @@ def llm_chat_with_tools(
         "tools": FIXAGO_TOOLS,
         "tool_choice": "auto",
     }
-    resp = requests.post(LLM_URL, json=payload, timeout=timeout)
+    resp = requests.post(LLM_URL, json=payload, timeout=timeout or LLM_TOOL_TIMEOUT)
     if resp.status_code != 200:
         raise RuntimeError(f"LLM server error {resp.status_code}: {resp.text[:200]}")
 
