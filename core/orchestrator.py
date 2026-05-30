@@ -450,17 +450,6 @@ def _extract_category_from_groups(query: str) -> str:
     query_lower = unicodedata.normalize("NFC", query.strip().lower())
     query_noaccent = normalize_noaccent(query_lower)
 
-    # If asking for general services, return "all" immediately
-    general_service_keywords = [
-        "dịch vụ gì", "những dịch vụ", "các dịch vụ",
-        "cung cấp gì", "làm gì", "sửa gì"
-    ]
-    if any(k in query_lower for k in general_service_keywords) or any(normalize_noaccent(k) in query_noaccent for k in general_service_keywords):
-        # Ensure they are not asking for a specific service alongside the general question
-        specifics = ["điện", "nước", "lạnh", "xây", "thạch"]
-        if not any(k in query_lower for k in specifics) and not any(normalize_noaccent(k) in query_noaccent for k in specifics):
-            return "all"
-
     # High-priority keywords for each category (checked first)
     priority_keywords = {
         "Điện": ["điện", "ổ cắm", "công tắc", "đèn", "chiếu sáng", "aptomat"],
@@ -469,6 +458,17 @@ def _extract_category_from_groups(query: str) -> str:
         "Xây dựng": ["sơn", "xây dựng", "tường", "gạch"],
         "Thạch cao": ["thạch cao", "trần", "drywall"],
     }
+
+    # If asking for general services, return "all" immediately
+    general_service_keywords = [
+        "dịch vụ gì", "những dịch vụ", "các dịch vụ",
+        "cung cấp gì", "làm gì", "sửa gì", "những gì"
+    ]
+    if any(k in query_lower for k in general_service_keywords) or any(normalize_noaccent(k) in query_noaccent for k in general_service_keywords):
+        # Ensure they are not asking for a specific service alongside the general question
+        specifics = [normalize_noaccent(k).lower() for group in priority_keywords.values() for k in group]
+        if not any(k in query_lower for k in specifics) and not any(normalize_noaccent(k) in query_noaccent for k in specifics):
+            return "all"
 
     # First pass: check priority keywords (exact match, highest scoring)
     for category, keywords in priority_keywords.items():
@@ -488,17 +488,25 @@ def _extract_category_from_groups(query: str) -> str:
         # Score each group based on description keyword matches
         best_score = 0
         best_category = "all"
+        stop_words = {"dịch", "vụ", "công", "ty", "cấp", "cung", "có", "thể", "sửa", "chữa", "cho", "xin", "làm", "những", "các", "em", "anh", "chị", "khách", "hàng"}
 
         for group in groups:
-            desc = (group.get("description", "") + " " + group.get("name", "")).lower()
+            name = group.get("name", "").lower()
+            name_noaccent = normalize_noaccent(name)
+            
+            # If the user directly queries the exact group name (e.g. "mộc", "vệ sinh")
+            if name and (name in query_lower or name_noaccent in query_noaccent):
+                return name
 
-            # Count how many words from query appear in description
-            query_words = query_lower.split()
-            score = sum(1 for word in query_words if len(word) > 2 and word in desc)
+            desc = normalize_noaccent((group.get("description", "") + " " + name)).lower()
+
+            # Count how many meaningful words from query appear in description
+            query_words = [w for w in query_noaccent.split() if w not in stop_words and len(w) > 2]
+            score = sum(1 for word in query_words if word in desc)
 
             if score > best_score:
                 best_score = score
-                best_category = group.get("name", "all").lower()
+                best_category = name
 
         if best_score > 0:
             return best_category
