@@ -949,11 +949,21 @@ def run_native_tool_path(query: str, history: list, messages: list, used_tools: 
             raw_svc = tool_result.get("category") or tool_result.get("search", "")
             print(f"[DEBUG] get_services: raw_svc={raw_svc}", flush=True)
 
-            # If model defaulted to "all", extract category from query
-            if raw_svc in ("all", "", None):
-                raw_svc = _extract_category_from_groups(query)
+            # ALWAYS re-extract category from the CURRENT query.
+            # Do NOT trust LLM-provided category — it can be contaminated by
+            # session history (e.g. user asked about "điện" before, now asks "ống nước").
+            extracted = _extract_category_from_groups(query)
 
-            # If still unknown after extraction — service not in our catalog
+            # Use extracted category; only fall back to LLM's value if extraction
+            # returns "unknown" AND LLM provided something specific (not "all"/empty).
+            if extracted != "unknown":
+                raw_svc = extracted
+            elif raw_svc in ("all", "", None):
+                raw_svc = "unknown"
+            # else: extracted=="unknown" but LLM gave a specific non-"all" value
+            # → trust the LLM this one time (edge case: very short/ambiguous query)
+
+            # If unknown — service not in our catalog
             if raw_svc == "unknown":
                 from core.intent_router import detect_user_language
                 lang = detect_user_language(query)
