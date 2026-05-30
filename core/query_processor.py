@@ -4,12 +4,8 @@ Multi-question splitting, multi-service detection, tool data fetching.
 """
 import re
 
-from core.intent_router import normalize_noaccent, detect_tool_intent, is_hours_question
-from tools.handlers import (
-    fetch_raw_groups, fetch_raw_services, fetch_raw_promotions,
-    format_groups_for_llm, format_services_for_llm, format_promotions_for_llm,
-)
-from booking.handler import normalize_service_search
+# NOTE: This file is legacy and not used in experiment branch.
+# Keeping for reference only. All logic moved to orchestrator_simple.py
 
 _Q_SIGNALS = [
     "giá", "bao nhiêu", "gì", "sao", "thế nào", "ra sao", "như thế",
