@@ -7,6 +7,3 @@
 [submodule "pomaicache"]
 	path = pomaicache
 	url = https://github.com/pomagrenate/pomaicache.git
-[submodule "cheesepath"]
-	path = cheesepath
-	url = https://github.com/pomagrenate/cheesepath.git

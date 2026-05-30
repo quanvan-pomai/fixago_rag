@@ -123,3 +123,154 @@ def classify_intent(query: str):
         matched_signals=[],
         ambiguity_reason="semantic_routing_by_llm",
     )
+
+
+# ── Multi-Question Detection & Splitting ────────────────────────────────────────
+
+def split_multi_questions(query: str) -> list:
+    """
+    Split a query with multiple questions into separate sub-queries.
+
+    Examples:
+    - "Services + prices?" → ["Services?", "prices?"]
+    - "Where are you, hours?" → ["Where are you?", "hours?"]
+    - "Price and can you install?" → ["Price?", "Can you install?"]
+
+    Returns list of sub-queries (minimum 1, original if no split detected)
+    """
+    # Sentence splitters: period, question mark, newline
+    sentences = re.split(r'[.!?]\s+', query.strip())
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    if len(sentences) > 1:
+        return sentences
+
+    # Check for conjunction-based splitting (English)
+    if re.search(r'\b(and|or|plus|also|with|with the)\b', query, re.IGNORECASE):
+        # Split on 'and' / 'or' while preserving intent
+        parts = re.split(r'\s+(and|or|plus|với|với cái)\s+', query, flags=re.IGNORECASE)
+        questions = []
+        i = 0
+        while i < len(parts):
+            if parts[i].lower() in ('and', 'or', 'plus', 'và', 'hoặc', 'với', 'với cái'):
+                i += 1
+                continue
+            segment = parts[i].strip()
+            if segment and '?' not in segment:
+                segment += '?'
+            if segment:
+                questions.append(segment)
+            i += 1
+        if len(questions) > 1:
+            return questions
+
+    # Check for Vietnamese conjunction-based splitting
+    if re.search(r'(và|với|hoặc|cùng|kèm theo)', query):
+        parts = re.split(r'[,;]\s*|(và|với|hoặc|cùng|kèm theo)\s+', query)
+        questions = []
+        for part in parts:
+            if part and part.lower() not in ('và', 'với', 'hoặc', 'cùng', 'kèm theo'):
+                segment = part.strip()
+                if segment and not segment.endswith('?'):
+                    segment += '?'
+                if segment:
+                    questions.append(segment)
+        if len(questions) > 1:
+            return questions
+
+    # Comma-separated (Vietnamese style: "giá sao, thợ qua được không?")
+    if ',' in query and len(query.split(',')) > 1:
+        parts = [p.strip() for p in query.split(',')]
+        questions = []
+        for part in parts:
+            if part and not part.endswith('?'):
+                part += '?'
+            if part:
+                questions.append(part)
+        if len(questions) > 1:
+            return questions
+
+    return [query]
+
+
+def detect_multi_intents(query: str) -> list:
+    """
+    Detect which intents are present in a multi-question query.
+
+    Returns: List of intent types: 'service_overview', 'pricing', 'hours', 'payment',
+             'area', 'promotions', 'capability', etc.
+    """
+    intents = []
+
+    # Check for each intent type
+    if any(k in query.lower() for k in ["dịch vụ", "dich vu", "services", "offer", "làm gì", "lam gi"]):
+        intents.append('service_overview')
+
+    if is_price_question(query):
+        intents.append('pricing')
+
+    if is_hours_question(query):
+        intents.append('hours')
+
+    if any(k in query.lower() for k in ["thanh toán", "thanh toan", "payment", "trả tiền", "tra tien"]):
+        intents.append('payment')
+
+    if any(k in query.lower() for k in ["ở đâu", "o dau", "phục vụ", "phuc vu", "location", "where"]):
+        intents.append('area')
+
+    if any(k in query.lower() for k in ["khuyến mãi", "khuyen mai", "giảm giá", "giam gia", "promotion", "discount", "voucher"]):
+        intents.append('promotions')
+
+    if any(k in query.lower() for k in ["sửa được", "sua duoc", "khả năng", "kha nang", "capability", "can you", "fix"]):
+        intents.append('capability')
+
+    return intents if intents else ['general']
+
+
+def is_faq_query(query: str) -> bool:
+    """
+    Fast-path detector for FAQ (Frequently Asked Questions).
+    FAQ queries are operational/business questions, NOT service requests or pricing questions.
+
+    Returns True if query matches FAQ keywords:
+    - Response time & booking methods
+    - Technician tracking
+    - Travel fees
+    - Company/business info
+    - Payment methods (distinct from price inquiries)
+
+    This gate is checked BEFORE semantic routing to avoid router confusion.
+    """
+    faq_keywords = [
+        # Response time, booking methods (Vietnamese)
+        "thời gian", "đáp ứng", "đặt lịch", "lịch hẹn", "bao lâu",
+        "khi nào", "mấy giờ", "bao giờ", "lâu không",
+
+        # Response time, booking methods (English)
+        "response time", "how long", "book", "schedule", "appointment",
+        "confirm", "how to book", "booking method", "time to arrive", "when can you",
+
+        # Technician tracking & identification (Vietnamese)
+        "thợ", "biết", "theo dõi", "tracking", "app", "lịch sử",
+        "thợ nào", "thợ sẽ", "thợ có", "liên hệ", "lien he", "thông báo",
+
+        # Technician tracking & identification (English)
+        "technician", "worker", "contact", "notification", "track", "which technician", "who will",
+
+        # Travel fees & service costs (Vietnamese + English)
+        "phí di chuyển", "phi di chuyen", "travel fee", "travel cost",
+        "chi phí di chuyển", "tính tiền gì", "tiền vận chuyển", "delivery",
+
+        # Company/business info (Vietnamese)
+        "công ty", "cong ty", "giới thiệu", "gioi thieu", "về", "chúng ta", "chung ta", "chúng em", "chung em",
+
+        # Company/business info (English)
+        "about", "company", "introduce", "information", "services", "what do you offer",
+
+        # Payment methods (Vietnamese + English, as business fact not pricing)
+        "thanh toán", "thanh toan", "trả tiền", "tra tien", "fixago",
+        "payment method", "pay", "accept", "nhận", "nhan",
+    ]
+
+    query_lower = query.lower()
+    return any(kw in query_lower for kw in faq_keywords)

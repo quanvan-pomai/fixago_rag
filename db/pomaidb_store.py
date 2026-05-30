@@ -14,6 +14,7 @@ import shutil
 import unicodedata
 from pathlib import Path
 from typing import Any, Dict
+from core.lexicon import FIXAGO_SYNONYMS
 
 logger = logging.getLogger("fixago.pomaidb_store")
 
@@ -46,6 +47,15 @@ SEEDS = [
     (1004, "Dịch vụ điện lạnh của Fixago bao gồm bảo dưỡng điều hòa, nạp gas máy lạnh, sửa tủ lạnh không lạnh và lắp đặt máy giặt."),
     (1005, "Dịch vụ sửa chữa xây dựng của Fixago bao gồm sơn sửa nhà cửa, chống thấm dột tường nhà, ốp lát gạch nền và sửa chữa ban công."),
     (1006, "Dịch vụ trần thạch cao của Fixago bao gồm đóng trần thạch cao nổi, làm vách ngăn thạch cao cách âm và sửa chữa các tấm thạch cao bị nứt bể."),
+
+    # FAQ: Response time and booking
+    (2001, "Thời gian đáp ứng của Fixago tùy thuộc vào vị trí của khách hàng đến địa điểm thợ. Khách hàng có thể đặt lịch bất kỳ ngày nào muốn, tổng cộng sẽ tốn khoảng 15-30 phút tùy tình hình đường xá. Khách hàng có thể đặt lịch trực tiếp trên website, trong app mobile hoặc liên hệ trực tiếp với Fixie để được hỗ trợ đặt lịch."),
+
+    # FAQ: Technician tracking
+    (2002, "Khách hàng có thể biết thợ sẽ đến khi nào bằng cách thợ sẽ liên hệ trước khi đến, hoặc khách hàng có thể theo dõi vị trí thợ thông qua ứng dụng mobile của Fixago."),
+
+    # FAQ: Travel fee included
+    (2003, "Chi phí dịch vụ của Fixago đã bao gồm phí di chuyển, không phải trả thêm. Giá trên website là giá cuối cùng mà khách hàng sẽ thanh toán."),
 ]
 
 # ── Internal helpers ─────────────────────────────────────────────────────────
@@ -95,19 +105,7 @@ def normalize_query(query: Any) -> str:
     q_lower = raw.lower()
     q_no_accents = strip_vietnamese_accents(q_lower)
 
-    synonym_groups = {
-        "điện":      ["dien", "chập", "chap", "ổ cắm", "o cam", "bóng đèn", "bong den",
-                      "công tắc", "cong tac", "tủ điện", "tu dien", "aptomat", "cb"],
-        "nước":      ["nuoc", "ống nước", "ong nuoc", "rò nước", "ro nuoc", "nghẹt",
-                      "nghet", "vòi sen", "voi sen", "bồn cầu", "bon cau", "máy bơm", "may bom"],
-        "điện lạnh": ["dien lanh", "máy lạnh", "may lanh", "điều hòa", "dieu hoa",
-                      "tủ lạnh", "tu lanh", "nạp gas", "nap gas", "không lạnh", "khong lanh"],
-        "xây dựng":  ["xay dung", "sơn", "son", "chống thấm", "chong tham",
-                      "ốp lát", "op lat", "gạch", "gach", "ban công", "ban cong"],
-        "thạch cao": ["thach cao", "trần", "tran", "vách ngăn", "vach ngan", "nứt", "nut", "bể", "be"],
-        "sửa chữa":  ["sua", "sửa", "hỏng", "hong", "lỗi", "loi", "khắc phục", "khac phuc"],
-        "giá":       ["gia", "bao nhiêu", "bao nhieu", "báo giá", "bao gia", "chi phí", "chi phi"],
-    }
+    synonym_groups = FIXAGO_SYNONYMS
 
     additions = []
     seen: set = set()

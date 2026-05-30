@@ -52,9 +52,10 @@ _AREA_PATTERNS = [
     "phủ sóng", "phu song",
     "quận mấy", "quan may", "địa bàn", "dia ban",
     "fixago ở đâu", "fixago o dau", "địa chỉ fixago", "dia chi fixago",
-    "công ty ở đâu", "cong ty o dau", "trụ sở", "tru so",
+    "công ty ở đâu", "cong ty o dau", "công ty của em ở đâu",
+    "trụ sở", "tru so",
     "có ở quận", "co o quan",
-    "ở đâu vậy", "o dau vay", "ở đâu ạ", "o dau a",
+    "ở đâu vậy", "o dau vay", "ở đâu ạ", "o dau a", "ở đâu", "o dau",
 ]
 
 # Location names that are ambiguous — only trigger when paired with a question signal
@@ -279,27 +280,63 @@ def deterministic_business_reply(query: str) -> str:
     """
     from core.intent_router import detect_user_language
 
-    q = normalize_noaccent((query or "").strip().lower())
+    q_lower = (query or "").strip().lower()
+    q = normalize_noaccent(q_lower)
     lang = detect_user_language(query)
 
     # ONLY answer pure business facts that have nothing to do with repair/booking
 
     # 1. Working hours (pure business fact)
-    if _is_working_hours_question(q):
+    if _is_working_hours_question(q_lower):
         if lang == "en":
             return "Fixago operates 24/7, including weekends and holidays."
         else:
             return "Dạ Fixago hoạt động 24/7, kể cả cuối tuần và ngày lễ."
 
     # 2. Payment method (pure business fact)
-    if _is_payment_question(q):
+    if _is_payment_question(q_lower):
         if lang == "en":
             return "Fixago accepts cash or bank transfer."
         else:
             return "Dạ Fixago nhận thanh toán bằng tiền mặt hoặc chuyển khoản."
 
-    # 3. Unsupported service (pure business fact — NOT about repair)
-    if _is_unsupported_service_question(q):
+    # 2.5. Warranty/guarantee (pure business fact)
+    if _is_warranty_question(q_lower):
+        if lang == "en":
+            return "Warranty is 30 days from the service date. If the issue was caused by our technician, we will fix it free of charge."
+        else:
+            return "Dạ bảo hành là 30 ngày từ ngày thực hiện dịch vụ. Nếu lỗi do kỹ thuật viên của chúng em gây ra, chúng em sửa lại miễn phí ạ."
+
+    # 3. Response time & booking methods (FAQ)
+    if _is_response_time_question(q_lower):
+        if lang == "en":
+            return "Our response time is typically 15-30 minutes, depending on your location. You can book a technician anytime through our website, mobile app, or by contacting us directly."
+        else:
+            return "Dạ thời gian đáp ứng tùy vào vị trí của anh/chị, tầm 15-30 phút. Anh/chị có thể đặt lịch bất kỳ lúc nào qua website, app, hoặc liên hệ trực tiếp với chúng em."
+
+    # 3.5. Technician tracking (FAQ)
+    if _is_technician_tracking_question(q_lower):
+        if lang == "en":
+            return "The technician will contact you before arrival. You can also track progress through our app."
+        else:
+            return "Dạ thợ sẽ liên hệ anh/chị ngay trước khi đến. Anh/chị cũng có thể theo dõi thợ qua app."
+
+    # 3.7. Travel fee (FAQ)
+    if _is_travel_fee_question(q_lower):
+        if lang == "en":
+            return "Travel fee is already included in the price. No additional charges."
+        else:
+            return "Dạ phí di chuyển đã bao gồm trong giá dịch vụ ạ, không phải trả thêm."
+
+    # 3.9. Company info (FAQ)
+    if _is_company_info_question(q_lower):
+        if lang == "en":
+            return "Fixago is a trusted home repair platform offering electrical, plumbing, air conditioning, construction, and drywall services. We operate 24/7 in Ho Chi Minh City and provide fast, reliable service."
+        else:
+            return "Dạ Fixago là nền tảng sửa chữa nhà đáng tin cậy, cung cấp dịch vụ điện, nước, máy lạnh, xây dựng, và thạch cao. Chúng em hoạt động 24/7 ở TP.HCM với dịch vụ nhanh chóng và uy tín."
+
+    # 4. Unsupported service (pure business fact — NOT about repair)
+    if _is_unsupported_service_question(q_lower):
         if lang == "en":
             return "Fixago doesn't currently support door lock replacement. Can I help with any other repair services?"
         else:
@@ -329,18 +366,89 @@ def _is_working_hours_question(q_normalized: str) -> bool:
 def _is_payment_question(q_normalized: str) -> bool:
     """Check if query asks about payment methods."""
     payment_signals = [
-        "thanh toán", "thanh toan", "payment", "tiền mặt", "tien mat", "cash",
+        "thanh toán", "thanh toan", "payment", "tiền", "tien",
+        "tiền mặt", "tien mat", "cash",
         "chuyển khoản", "chuyen khoan", "transfer", "credit", "thẻ", "the", "card"
     ]
-    question_signals = ["nào", "nao", "what", "how", "được", "duoc", "accept", "nhận", "nhan"]
+    question_signals = ["nào", "nao", "what", "how", "cách", "cach", "được", "duoc", "accept", "nhận", "nhan"]
     return any(p in q_normalized for p in payment_signals) and any(
         s in q_normalized for s in question_signals
     )
 
 
+def _is_warranty_question(q_normalized: str) -> bool:
+    """Check if query asks about warranty/guarantee (PURE warranty question, not mixed with service)."""
+    warranty_keywords = ["bảo hành", "warranty", "guarantee", "garantia"]
+    question_signals = ["bao lau", "bao lâu", "how long", "bao nhiêu", "cơ mà", "không", "co"]
+    # Don't answer if service is mentioned (e.g., "sửa máy lạnh có bảo hành không")
+    # Let multi-question rejection handle mixed queries
+    service_keywords = ["sửa", "sua", "thay", "repair", "fix", "làm", "lam", "máy lạnh", "dien", "nuoc"]
+    has_warranty_question = any(w in q_normalized for w in warranty_keywords) and any(
+        s in q_normalized for s in question_signals
+    )
+    has_service = any(s in q_normalized for s in service_keywords)
+    return has_warranty_question and not has_service
+
+
+def _is_response_time_question(q_normalized: str) -> bool:
+    """Check if query asks about response time or booking methods."""
+    # Vietnamese
+    keywords = ["thời gian", "thoi gian", "đáp ứng", "dap ung", "bao lâu", "bao lau", "bao giờ", "bao gio"]
+    booking_keywords = ["đặt lịch", "dat lich", "lịch hẹn", "lich hen", "booking", "book", "khi nào", "khi nao"]
+
+    # English
+    en_keywords = ["how long", "response time", "confirm", "arrive", "when will"]
+
+    has_time = any(k in q_normalized for k in keywords)
+    has_booking = any(k in q_normalized for k in booking_keywords)
+    has_en = any(k in q_normalized for k in en_keywords)
+
+    return has_time or has_booking or has_en
+
+
+def _is_technician_tracking_question(q_normalized: str) -> bool:
+    """Check if query asks about technician tracking or identification."""
+    keywords = ["thợ", "tho", "biết", "biet", "theo dõi", "theo doi", "tracking", "app", "nhân viên", "nhan vien"]
+    question_signals = ["sẽ", "se", "có", "co", "nào", "nao", "đến", "den", "sao", "cách", "cach"]
+
+    has_tech = any(k in q_normalized for k in keywords)
+    has_question = any(s in q_normalized for s in question_signals)
+
+    return has_tech and has_question
+
+
+def _is_travel_fee_question(q_normalized: str) -> bool:
+    """Check if query asks about travel fee inclusion."""
+    keywords = ["phí", "phi", "chi phí", "chi phi", "di chuyển", "di chuyen", "tiền", "tien", "trả", "tra"]
+    fee_words = ["phí di chuyển", "phi di chuyen", "phí", "phi", "travel", "delivery", "tính tiền", "tinh tien"]
+    question_signals = ["bao gồm", "bao gom", "có", "co", "chưa", "chua", "include", "included"]
+
+    has_fee = any(f in q_normalized for f in fee_words)
+    has_question = any(s in q_normalized for s in question_signals)
+
+    return has_fee and has_question
+
+
+def _is_company_info_question(q_normalized: str) -> bool:
+    """Check if query asks about company info or services."""
+    keywords = ["công ty", "cong ty", "giới thiệu", "gioi thieu", "về", "company", "introduce", "about", "services", "what"]
+    question_signals = ["nào", "nao", "gì", "gi", "can you", "could you", "do you"]
+
+    has_company = any(k in q_normalized for k in keywords)
+    has_question = any(s in q_normalized for s in question_signals)
+
+    return has_company or has_question
+
+
 def _is_unsupported_service_question(q_normalized: str) -> bool:
-    """Check if query asks about unsupported services (door locks)."""
-    unsupported = ["khóa cửa", "lock", "thay khóa", "key"]
+    """Check if query asks about unsupported services."""
+    unsupported = [
+        # Door locks
+        "khóa cửa", "lock", "thay khóa", "key",
+        # Kitchen appliances
+        "lò nướng", "oven", "tủ lạnh", "refrigerator", "máy giặt", "washing",
+        "máy sấy", "dryer", "bếp", "stove", "lò vi sóng", "microwave"
+    ]
     question_signals = ["không", "có", "can", "do", "support"]
     return any(u in q_normalized for u in unsupported) and any(
         s in q_normalized for s in question_signals

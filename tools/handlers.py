@@ -13,6 +13,7 @@ Caching strategy:
   On cache miss: fetch from backend, store result.
   Cache is injected at module level via init_cache(); falls back to no-cache if not set.
 """
+import ctypes
 import json
 import logging
 import os
@@ -490,28 +491,45 @@ def handle_get_promotions(messages: List[Dict], used_tools: List[str]) -> str:
     try:
         resp = requests.get(f"{BACKEND_URL}/discounts/available", timeout=3)
         if resp.status_code == 200:
-            raw    = resp.json()
+            raw = resp.json()
             promos = raw if isinstance(raw, list) else raw.get("data", [])
+
             if promos:
                 lines = ["Dạ Fixago hiện có các chương trình ưu đãi sau:"]
                 for p in promos:
                     line = f"- {p.get('name', 'Ưu đãi')}"
+
+                    # Add code if it's a voucher (code-based discount)
                     if p.get("code"):
                         line += f" (mã: {p['code']})"
-                    if p.get("discountType") == 1:
-                        line += f": giảm {p.get('discountValue', 0)}%"
-                        if p.get("maxDiscountAmount"):
-                            line += f", tối đa {_fmt_vnd(p['maxDiscountAmount'])}"
-                    else:
-                        line += f": giảm {_fmt_vnd(p.get('discountValue', 0))}"
+
+                    # Format discount based on type (1=percent, 2=fixed)
+                    discount_type = p.get("discountType", 0)
+                    if discount_type == 1:
+                        # Percentage discount
+                        discount_val = p.get("discountValue", 0)
+                        line += f": giảm {discount_val}%"
+                        max_amount = p.get("maxDiscountAmount")
+                        if max_amount and float(max_amount) > 0:
+                            line += f", tối đa {_fmt_vnd(max_amount)}"
+                    elif discount_type == 2:
+                        # Fixed amount discount
+                        discount_val = p.get("discountValue", 0)
+                        line += f": giảm {_fmt_vnd(discount_val)}"
+
                     lines.append(line)
-                lines.append("Bạn muốn mình tư vấn thêm hoặc hỗ trợ đặt lịch không ạ?")
+
+                lines.append("\nBạn muốn mình tư vấn thêm hoặc hỗ trợ đặt lịch không ạ?")
                 return "\n".join(lines)
             else:
                 return (
                     "Dạ hiện Fixago chưa có chương trình khuyến mãi nào. "
                     "Bạn mô tả tình trạng cần sửa để mình tư vấn dịch vụ phù hợp nhé!"
                 )
+        else:
+            logger.warning(f"handle_get_promotions: HTTP {resp.status_code}")
+            raise Exception(f"HTTP {resp.status_code}")
+
     except Exception as exc:
         logger.warning("handle_get_promotions backend error: %s", exc)
 
@@ -519,3 +537,17 @@ def handle_get_promotions(messages: List[Dict], used_tools: List[str]) -> str:
         "Dạ mình chưa lấy được thông tin khuyến mãi lúc này. "
         "Bạn mô tả tình trạng cần sửa để mình tư vấn dịch vụ phù hợp nhé!"
     )
+
+
+def handle_get_faq(query: str) -> str:
+    """
+    FAQ Priority Path: Signal to use FAQcontext for LLM.
+    This doesn't directly answer - instead it marks the query for special handling
+    by semantic router to prioritize FAQ documents over service/pricing.
+
+    For now: returns empty and lets orchestrator continue.
+    The is_faq_query flag ensures hard-gate won't block it.
+    """
+    # Placeholder: In future, can implement direct pomaidb retrieval if needed
+    # For now, return empty to continue to semantic routing with FAQ-aware context
+    return ""

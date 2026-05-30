@@ -760,13 +760,28 @@
             input.style.height = `${Math.min(input.scrollHeight, Math.round(window.innerHeight * 0.28))}px`;
         }
 
-        async function queryAssistant(text) {
+        async function queryAssistant(text, includeHistory = true) {
+            // Get chat history from DOM (excluding boot message)
+            let history = [];
+            if (includeHistory) {
+                const rows = Array.from(chat.querySelectorAll(".message-row"));
+                // Only include user/bot messages AFTER the first message (boot message)
+                const messageRows = rows.slice(hasBooted && rows.length > 0 ? 1 : 0);
+                history = messageRows
+                    .map(row => {
+                        const msg = row.querySelector(".message");
+                        const sender = row.classList.contains("user-row") ? "user" : "bot";
+                        return { role: sender, content: msg.textContent || msg.innerText };
+                    })
+                    .filter(h => h.content.trim() !== "");
+            }
+
             const res = await fetch("/api/v1/rag/query", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     query: text,
-                    session_id: getChatSessionId()
+                    history: history
                 })
             });
 
@@ -791,7 +806,8 @@
             setTyping(true);
 
             try {
-                const data = await queryAssistant("Xin chào, hãy giới thiệu ngắn gọn bạn là ai và bạn có thể làm gì bằng tiếng Việt.");
+                // Boot message: don't include history
+                const data = await queryAssistant("Xin chào, hãy giới thiệu ngắn gọn bạn là ai và bạn có thể làm gì bằng tiếng Việt.", false);
                 setTyping(false);
                 if (data.status === "success" && data.response) {
                     appendMsg(data.response, "bot");

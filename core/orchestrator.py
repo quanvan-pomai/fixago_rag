@@ -5,6 +5,8 @@ Orchestration paths: fast path, legacy tool path, native tool path, session pers
 import re
 import hashlib
 import json
+import os
+import requests
 
 import rag_engine
 from booking.extractor import detect_negation, merge_booking_info
@@ -27,6 +29,17 @@ from tools.handlers import (
     handle_get_groups, handle_get_promotions, handle_get_services,
 )
 from booking.extractor import detect_confirmation
+try:
+    from fallback_config import (
+        synthesis_with_fallback, is_unsupported_service,
+        has_hallucination_markers, detect_fallback_reason
+    )
+except ImportError:
+    # Fallback config not available yet - define minimal stubs
+    def detect_fallback_reason(query, response, lang="vi"):
+        return None
+    def synthesis_with_fallback(query, response, lang="vi"):
+        return response
 
 _HOURS_FACT = "Fixago hoạt động 24/7, kể cả cuối tuần và ngày lễ."
 _DATA_INJECTION_MAX_TOKENS = 120
@@ -422,11 +435,134 @@ _NATIVE_TOOL_FALLBACK = (
 )
 
 
+def _extract_category_from_groups(query: str) -> str:
+    """
+    Extract best matching service category from user query using backend group descriptions.
+    Falls back to hardcoded keywords if backend unavailable.
+
+    Scores keywords in query against each group's description.
+    Prioritizes exact keyword matches (e.g., "đèn" > "trần").
+    Returns category name (e.g., "điện", "nước") or "all" if no match.
+    """
+    backend_url = os.environ.get("BACKEND_API_URL", "http://127.0.0.1:3001/api/v1")
+    query_lower = query.lower()
+
+    # High-priority keywords for each category (checked first)
+    priority_keywords = {
+        "Điện": ["điện", "ổ cắm", "công tắc", "đèn", "chiếu sáng", "aptomat"],
+        "Nước": ["nước", "ống", "rò rỉ", "tắc", "cống", "bơm"],
+        "Máy lạnh": ["máy lạnh", "điều hòa", "ac", "lạnh"],
+        "Xây dựng": ["sơn", "xây dựng", "tường", "gạch"],
+        "Thạch cao": ["thạch cao", "trần", "drywall"],
+    }
+
+    # First pass: check priority keywords (exact match, highest scoring)
+    for category, keywords in priority_keywords.items():
+        if any(k in query_lower for k in keywords):
+            return category.lower()
+
+    try:
+        # Fallback to backend description matching if no priority keyword matched
+        resp = requests.get(f"{backend_url}/services/groups", timeout=2)
+        if resp.status_code != 200:
+            return _extract_category_fallback(query_lower)
+
+        groups = resp.json() or []
+        if not groups:
+            return _extract_category_fallback(query_lower)
+
+        # Score each group based on description keyword matches
+        best_score = 0
+        best_category = "all"
+
+        for group in groups:
+            desc = (group.get("description", "") + " " + group.get("name", "")).lower()
+
+            # Count how many words from query appear in description
+            query_words = query_lower.split()
+            score = sum(1 for word in query_words if len(word) > 2 and word in desc)
+
+            if score > best_score:
+                best_score = score
+                best_category = group.get("name", "all").lower()
+
+        if best_score > 0:
+            return best_category
+        else:
+            return _extract_category_fallback(query_lower)
+
+    except Exception:
+        # Backend unavailable, use fallback
+        return _extract_category_fallback(query_lower)
+
+
+def _extract_category_fallback(query_lower: str) -> str:
+    """Hardcoded keyword fallback when backend unavailable."""
+    if any(k in query_lower for k in ["điện", "ổ cắm", "công tắc", "aptomat", "chập", "mất", "dây điện", "bóng đèn", "đèn"]):
+        return "điện"
+    elif any(k in query_lower for k in ["nước", "ống", "rò", "tắc", "cống", "thoát", "bơm"]):
+        return "nước"
+    elif any(k in query_lower for k in ["máy lạnh", "điều hòa", "ac", "lạnh", "tủ lạnh"]):
+        return "máy lạnh"
+    elif any(k in query_lower for k in ["xây dựng", "sơn", "tôn", "làm nhà", "build"]):
+        return "xây dựng"
+    elif any(k in query_lower for k in ["thạch cao", "trần", "drywall", "trần nhà"]):
+        return "thạch cao"
+    return "all"
+
+
 def run_native_tool_path(query: str, history: list, messages: list, used_tools: list) -> str:
     """Native function-calling path (cheese-server --jinja required)."""
     static_early = static_fallback(query)
     if static_early:
         return static_early
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # LAYER 0: FAQ PRIORITY PATH (Bypass semantic router confusion)
+    # FAQ questions (operational/business) are handled FIRST to avoid router mixing
+    # them with pricing/service questions
+    # ─────────────────────────────────────────────────────────────────────────────
+    from core.intent_router import is_faq_query
+    from tools.handlers import handle_get_faq
+
+    is_faq = is_faq_query(query)
+
+    if is_faq:
+        faq_answer = handle_get_faq(query)
+        if faq_answer:
+            return faq_answer
+        # If FAQ handler didn't find answer, continue to normal flow (skip hard-gate)
+    else:
+        # ── QUERY COMPLEXITY CHECK (HARD-GATE for non-FAQ only) ──────────────────────────────
+        # Layer 1: Punctuation-based multi-question detection
+        # Layer 2: Lexicon-based Service/Info counting (for queries without punctuation)
+        from core.intent_router import split_multi_questions, detect_user_language
+        from core.lexicon import is_multi_question_by_lexicon
+
+        sub_questions = split_multi_questions(query)
+        question_count = len(sub_questions)
+
+        # Layer 2: Check service/info groups (catches no-punctuation multi-questions)
+        is_multi_by_lexicon = is_multi_question_by_lexicon(query)
+
+        # HARD-GATE: BLOCK multi-questions BEFORE they reach LLM
+        # This is a CRIT GATE - cannot pass unless single question detected
+        # Catches both:
+        # - "Services and prices?" (Layer 1: 2 sub-questions)
+        # - "sửa ống nước với thay bóng đèn" (Layer 2: 2 services, no punctuation)
+
+        # MUST BE: question_count == 1 AND NOT is_multi_by_lexicon
+        is_definitely_multi = (question_count > 1) or is_multi_by_lexicon
+
+        if is_definitely_multi:
+            lang = detect_user_language(query)
+
+            if lang == "vi":
+                return ("Dạ Fixago đây ạ! Do tin nhắn của mình hơi dài nên hệ thống bên em đọc chưa hiểu hết ý. "
+                       "Anh/chị có thể chia nhỏ từng câu hỏi giúp em được không ạ? Em cảm ơn nhiều!")
+            else:
+                return ("Hi there! Your message is quite long, so I might miss something. "
+                       "Could you please break it down into separate questions? Thanks!")
 
     # Deterministic business facts layer — answer stable questions without LLM
     from core.guardrails import deterministic_business_reply
@@ -439,18 +575,340 @@ def run_native_tool_path(query: str, history: list, messages: list, used_tools: 
     if is_offtopic(query):
         return offtopic_response(query)
 
-    # Booking state machine: deterministic slot extraction before LLM routing
-    booking_resp = build_booking_response(query, history)
-    if booking_resp:
-        booking_resp = repair_booking_tool_call(booking_resp, query, history)
-        if "create_booking" in booking_resp.lower():
-            return handle_create_booking(booking_resp, used_tools)
-        return booking_resp
+    # Skip booking handler for INFO questions (price, promotions, warranty, etc.)
+    # These should go to LLM with tool calling, not to booking flow
+    info_keywords = [
+        # ── Vietnamese / no-accent: price / cost ─────────────────────────────
+        "bao nhiêu", "bao nhieu",
+        "giá", "gia",
+        "báo giá", "bao gia",
+        "chi phí", "chi phi",
+        "phí", "phi",
+        "tiền", "tien",
+        "tốn bao nhiêu", "ton bao nhieu",
+        "hết bao nhiêu", "het bao nhieu",
+        "hết mấy", "het may",
+        "bảng giá", "bang gia",
+        "giá tham khảo", "gia tham khao",
+        "giá dịch vụ", "gia dich vu",
+        "tổng bill", "tong bill",
+        "ước tính", "uoc tinh",
 
-    # LET LLM HANDLE SEMANTIC ROUTING
-    # Remove hardcoded pre-checks — Qwen2.5 3B is smart enough to understand intent
-    # The system prompt has explicit routing rules that the LLM will follow
-    # Trusting the model to call the right tools via native function calling
+        # ── English: price / cost ───────────────────────────────────────────
+        "how much",
+        "price",
+        "pricing",
+        "cost",
+        "fee",
+        "fees",
+        "charge",
+        "charges",
+        "quote",
+        "quotation",
+        "estimate",
+        "estimated cost",
+        "service fee",
+        "repair cost",
+        "price list",
+        "rate",
+        "budget",
+        "bill",
+
+        # ── Russian: price / cost ───────────────────────────────────────────
+        "цена",
+        "стоимость",
+        "сколько стоит",
+        "сколько будет стоить",
+        "прайс",
+        "смета",
+        "оценка стоимости",
+        "стоимость ремонта",
+        "цена ремонта",
+        "тариф",
+        "оплата",
+        "счет",
+
+        # ── Hindi / Hinglish: price / cost ──────────────────────────────────
+        "kitna",
+        "kitna lagega",
+        "kitne paise",
+        "rate",
+        "repair cost",
+        "service charge",
+        "bill kitna",
+        "कीमत",
+        "कितना",
+        "खर्च",
+        "चार्ज",
+        "रेट",
+
+        # ── French: price / cost ────────────────────────────────────────────
+        "prix",
+        "tarif",
+        "coût",
+        "cout",
+        "combien",
+        "combien ça coûte",
+        "combien ca coute",
+        "devis",
+        "estimation",
+        "frais",
+        "frais de service",
+        "tarification",
+        "facture",
+
+        # ── Promotion / discount ────────────────────────────────────────────
+        "khuyến mãi", "khuyen mai",
+        "ưu đãi", "uu dai",
+        "giảm giá", "giam gia",
+        "mã giảm", "ma giam",
+        "mã code", "ma code",
+        "voucher",
+        "coupon",
+        "code giảm", "code giam",
+        "chiết khấu", "chiet khau",
+        "discount",
+        "promotion",
+        "promo",
+        "discount code",
+        "promo code",
+        "offer",
+        "deal",
+        "special offer",
+        "скидка",
+        "акция",
+        "промокод",
+        "купон",
+        "छूट",
+        "ऑफर",
+        "कूपन",
+        "promo",
+        "réduction",
+        "reduction",
+        "code promo",
+        "remise",
+        "rabais",
+
+        # ── Warranty / guarantee / overcommitment ───────────────────────────
+        "bảo hành", "bao hanh",
+        "cam kết", "cam ket",
+        "đảm bảo", "dam bao",
+        "đền bù", "den bu",
+        "trách nhiệm", "trach nhiem",
+        "hư lại", "hu lai",
+        "sửa lại", "sua lai",
+        "warranty",
+        "guarantee",
+        "guaranteed",
+        "commitment",
+        "compensation",
+        "refund",
+        "money back",
+        "гарантия",
+        "компенсация",
+        "возврат денег",
+        "guarantee",
+        "warranty",
+        "गारंटी",
+        "वारंटी",
+        "garantie",
+        "remboursement",
+
+        # ── Working hours / timing / technician arrival ─────────────────────
+        "mấy giờ", "may gio",
+        "giờ làm", "gio lam",
+        "làm việc", "lam viec",
+        "ban đêm", "ban dem",
+        "cuối tuần", "cuoi tuan",
+        "ngày lễ", "ngay le",
+        "24/7",
+        "bao lâu", "bao lau",
+        "mất bao lâu", "mat bao lau",
+        "khi nào", "khi nao",
+        "thời gian", "thoi gian",
+        "mấy phút", "may phut",
+        "xác nhận", "xac nhan",
+        "how long",
+        "working hours",
+        "business hours",
+        "open time",
+        "opening hours",
+        "available at night",
+        "weekend",
+        "holiday",
+        "confirm time",
+        "arrival time",
+        "when can technician come",
+        "сколько времени",
+        "часы работы",
+        "работаете ночью",
+        "когда приедет",
+        "подтверждение",
+        "kitni der",
+        "kab aayega",
+        "working time",
+        "combien de temps",
+        "horaires",
+        "heure d'ouverture",
+        "confirmation",
+        "technicien arrive",
+
+        # ── Payment / invoice ───────────────────────────────────────────────
+        "thanh toán", "thanh toan",
+        "tiền mặt", "tien mat",
+        "chuyển khoản", "chuyen khoan",
+        "ngân hàng", "ngan hang",
+        "xuất hóa đơn", "xuat hoa don",
+        "hóa đơn", "hoa don",
+        "vat",
+        "payment",
+        "pay",
+        "cash",
+        "bank transfer",
+        "invoice",
+        "vat invoice",
+        "оплата",
+        "наличные",
+        "перевод",
+        "счет",
+        "pay karna",
+        "cash",
+        "bank transfer",
+        "भुगतान",
+        "paiement",
+        "espèces",
+        "especes",
+        "virement",
+        "facture",
+
+        # ── Service area / location / coverage ──────────────────────────────
+        "ở đâu", "o dau",
+        "địa chỉ công ty", "dia chi cong ty",
+        "khu vực", "khu vuc",
+        "phục vụ ở đâu", "phuc vu o dau",
+        "có tới", "co toi",
+        "có hỗ trợ", "co ho tro",
+        "ngoài khu vực", "ngoai khu vuc",
+        "quận nào", "quan nao",
+        "tỉnh nào", "tinh nao",
+        "where are you",
+        "where is fixago",
+        "service area",
+        "coverage",
+        "do you support",
+        "do you serve",
+        "available in",
+        "location",
+        "address",
+        "area",
+        "где вы",
+        "район обслуживания",
+        "вы работаете в",
+        "поддерживаете",
+        "kaha service",
+        "area support",
+        "service area",
+        "où êtes-vous",
+        "ou etes-vous",
+        "zone de service",
+        "vous intervenez",
+        "disponible à",
+        "disponible a",
+
+        # ── Company / service overview / identity ───────────────────────────
+        "dịch vụ gì", "dich vu gi",
+        "dịch vụ nào", "dich vu nao",
+        "có những dịch vụ", "co nhung dich vu",
+        "cung cấp gì", "cung cap gi",
+        "công ty làm gì", "cong ty lam gi",
+        "công ty tên gì", "cong ty ten gi",
+        "bạn là ai", "ban la ai",
+        "what services",
+        "which services",
+        "what do you provide",
+        "what does fixago do",
+        "who are you",
+        "introduce your company",
+        "company services",
+        "какие услуги",
+        "что делает fixago",
+        "кто вы",
+        "services kya hai",
+        "company kya karti hai",
+        "कौन सी services",
+        "quels services",
+        "que propose fixago",
+        "qui êtes-vous",
+        "qui etes-vous",
+        "présentez votre entreprise",
+        "presentez votre entreprise",
+
+        # ── Policy / trust / comparison / technician ────────────────────────
+        "uy tín", "uy tin",
+        "tin được không", "tin duoc khong",
+        "thợ có đúng", "tho co dung",
+        "chọn thợ", "chon tho",
+        "thợ riêng", "tho rieng",
+        "thợ ngoài", "tho ngoai",
+        "hơn gì", "hon gi",
+        "khác gì", "khac gi",
+        "vì sao chọn", "vi sao chon",
+        "why choose",
+        "trusted",
+        "reliable",
+        "specific technician",
+        "choose technician",
+        "why fixago",
+        "better than",
+        "сравнить",
+        "надежно",
+        "можно доверять",
+        "выбрать мастера",
+        "trust hai kya",
+        "reliable hai",
+        "technician choose",
+        "pourquoi choisir",
+        "fiable",
+        "technicien précis",
+        "choisir technicien",
+    ]
+    query_lower = query.lower()
+    is_info_question = any(kw in query_lower for kw in info_keywords)
+
+    # Booking state machine: deterministic slot extraction before LLM routing
+    # BUT: Skip booking handler if this is an INFO question (ask for price/warranty/promotion info)
+    if not is_info_question:
+        booking_resp = build_booking_response(query, history)
+        if booking_resp:
+            booking_resp = repair_booking_tool_call(booking_resp, query, history)
+            if "create_booking" in booking_resp.lower():
+                return handle_create_booking(booking_resp, used_tools)
+            return booking_resp
+
+    # ── SEMANTIC ROUTING: ONLY for deterministic facts, not for information queries ─
+    # IMPORTANT: Only use semantic router for DETERMINISTIC responses (hours, payment, area, unsupported)
+    # Let LLM handle information queries (services, pricing, promotions) with proper tool calling
+    from core.semantic_router import route as semantic_route, handle_intent
+
+    intent, confidence = semantic_route(query)
+
+    # Only return deterministic response if it's a DETERMINISTIC intent
+    deterministic_intents = ["hours_question", "payment_question", "unsupported_service", "location_question"]
+
+    if intent != "unclear" and intent in deterministic_intents and confidence >= 0.75:
+        # Semantic router matched a DETERMINISTIC intent with high confidence
+        response = handle_intent(intent, query, confidence)
+        if response is not None:
+            # Deterministic response (location, hours, payment, unsupported service)
+            used_tools.append(f"[SemanticRoute] {intent} (confidence: {confidence:.2f})")
+            return response
+
+    # For information queries (services, pricing, promotions), let LLM handle with tools
+    # Don't return early - fall through to llm_chat_with_tools
+
+    # LET LLM HANDLE REMAINING ROUTING
+    # The system prompt guides tool calling for service queries
+    # Semantic router handles deterministic business facts and high-confidence intents
 
     try:
         tool_name, tool_result, raw_msg = llm_chat_with_tools(messages, temperature=0.0)
@@ -463,9 +921,18 @@ def run_native_tool_path(query: str, history: list, messages: list, used_tools: 
 
     # Tool call: fetch data + inject [DỮ LIỆU HỆ THỐNG] + re-call LLM with price
     if tool_name in ("get_groups", "get_services", "get_promotions"):
+        print(f"[DEBUG] Native tool call: tool_name={tool_name}, tool_result={tool_result}", flush=True)
         messages.append({"role": "assistant", "content": None, "tool_calls": raw_msg.get("tool_calls")})
         if tool_name == "get_services":
             raw_svc = tool_result.get("category") or tool_result.get("search", "")
+            print(f"[DEBUG] get_services: raw_svc={raw_svc}", flush=True)
+
+            # FALLBACK: If model defaulted to "all", extract category from query using backend groups
+            original_raw_svc = raw_svc
+            if raw_svc == "all":
+                # Use backend service groups to find the best matching category
+                raw_svc = _extract_category_from_groups(query)
+
             search = normalize_service_search(raw_svc)
             tool_str = f'CALL_TOOL: get_services(search="{search}")'
         else:
@@ -496,7 +963,36 @@ def run_native_tool_path(query: str, history: list, messages: list, used_tools: 
 
     # No tool called: LLM returned plain text (booking collection, clarification, etc.)
     fix = validate_llm_output(tool_result, None, query)
-    return fix if fix is not None else tool_result
+    llm_response = fix if fix is not None else tool_result
+
+    # ── FALLBACK PROTECTION: Check for hallucination ──────────────────────
+    # Apply strict data synthesis validation for info questions
+    from core.intent_router import detect_user_language
+    lang = detect_user_language(query)
+
+    # Check if this is an info question (price, policy, capability)
+    is_info_question = any(kw in query.lower() for kw in [
+        "bao nhiêu", "giá", "chi phí", "phí", "tiền",
+        "how much", "price", "cost", "fee",
+        "khuyến mãi", "giảm giá", "voucher", "discount",
+        "bảo hành", "warranty", "có được không", "được không",
+        "hỗ trợ", "support", "làm được", "can you"
+    ])
+
+    if is_info_question:
+        # For info questions: validate against hallucination
+        hallucination_reason = detect_fallback_reason(query, llm_response, lang)
+        if hallucination_reason:
+            # Hallucination detected → trigger fallback
+            try:
+                from fallback_config import get_fallback_response
+                fallback = get_fallback_response(hallucination_reason, lang)
+            except ImportError:
+                fallback = llm_response
+            print(f"[FALLBACK] Detected: {hallucination_reason} | Original: {llm_response[:50]}...", flush=True)
+            return fallback
+
+    return llm_response
 
 
 def persist_session(session_id: str, session: dict, query: str, answer: str):
