@@ -25,8 +25,8 @@ from tools.handlers import (
     fetch_raw_groups, fetch_raw_services, fetch_raw_promotions,
     format_groups_for_llm, format_services_direct, format_promotions_for_llm,
     handle_get_groups, handle_get_services, handle_get_promotions,
-    handle_create_booking,
 )
+from booking.handler import execute_create_booking
 
 
 def get_cached_or_fresh_data(tool_name: str, search_arg: Optional[str] = None) -> Tuple[list, bool]:
@@ -83,21 +83,21 @@ def run_pure_llm_path(
     No pre-checks, no keyword extraction.
     """
 
+    # Build messages for LLM
+    messages = history.copy() if history else []
+    messages.append({"role": "user", "content": query})
+
     # Call LLM with tools enabled
-    response, tool_calls = llm_chat_with_tools(
-        query=query,
-        history=history,
-        system_prompt=system_prompt,
-        session_id=session_id,
+    tool_name, tool_args, response_msg = llm_chat_with_tools(
+        messages=messages,
     )
 
-    # Process tool calls if any
+    # Process tool call if any
     used_tools = []
     tool_results = {}
+    response = response_msg  # Use the response from LLM
 
-    for tool_call in tool_calls:
-        tool_name = tool_call.get("function", {}).get("name", "")
-        tool_args = tool_call.get("function", {}).get("arguments", {})
+    if tool_name:  # If a tool was called
 
         if tool_name == "get_groups":
             # No args - just get all groups
@@ -128,23 +128,19 @@ def run_pure_llm_path(
             address = tool_args.get("address", "")
             description = tool_args.get("description", "")
 
-            result = handle_create_booking(name, phone, address, description)
-            tool_results[tool_name] = result
+            result = execute_create_booking(name, phone, address, description)
+            tool_results[tool_name] = str(result)
             used_tools.append("create_booking")
 
     # If tools were called, feed results back to LLM for final response
     if tool_results:
         # Second LLM call with tool results
-        final_response, _ = llm_chat_with_tools(
-            query=query,
-            history=history + [
-                {"role": "assistant", "content": response},
-                {"role": "user", "content": f"Tool results: {json.dumps(tool_results)}"},
-            ],
-            system_prompt=system_prompt,
-            session_id=session_id,
-        )
-        response = final_response
+        followup_messages = messages.copy()
+        followup_messages.append({"role": "assistant", "content": response})
+        followup_messages.append({"role": "user", "content": f"Tool results: {json.dumps(tool_results)}"})
+
+        _, _, final_msg = llm_chat_with_tools(messages=followup_messages)
+        response = final_msg
 
     return {
         "status": "success",

@@ -74,7 +74,7 @@ def rag_query():
     # Setup tracing
     trace_id = str(uuid.uuid4())
     set_current_trace_id(trace_id)
-    trace = RequestTrace(trace_id=trace_id, session_id=session_id, query=query)
+    trace = RequestTrace(trace_id=trace_id, session_id=session_id)
 
     try:
         # Load system prompt
