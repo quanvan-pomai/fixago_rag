@@ -442,10 +442,11 @@ def _extract_category_from_groups(query: str) -> str:
 
     Scores keywords in query against each group's description.
     Prioritizes exact keyword matches (e.g., "đèn" > "trần").
-    Returns category name (e.g., "điện", "nước") or "all" if no match.
+    Returns category name (e.g., "điện", "nước") or "unknown" if no match.
     """
+    import unicodedata
     backend_url = os.environ.get("BACKEND_API_URL", "http://127.0.0.1:3001/api/v1")
-    query_lower = query.lower()
+    query_lower = unicodedata.normalize("NFC", query.strip().lower())
 
     # High-priority keywords for each category (checked first)
     priority_keywords = {
