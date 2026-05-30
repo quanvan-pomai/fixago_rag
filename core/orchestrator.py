@@ -916,7 +916,7 @@ def run_native_tool_path(query: str, history: list, messages: list, used_tools: 
     intent, confidence = semantic_route(query)
 
     # Only return deterministic response if it's a DETERMINISTIC intent
-    deterministic_intents = ["payment_question", "unsupported_service"]
+    deterministic_intents = ["payment_question"]
 
     if intent != "unclear" and intent in deterministic_intents and confidence >= 0.75:
         # Semantic router matched a DETERMINISTIC intent with high confidence

@@ -127,13 +127,6 @@ INTENT_ROUTES = {
         "tiền mặt được không",
         "bao gồm tiền di chuyển chưa",
     ],
-    "unsupported_lock": [
-        "thay khóa cửa",
-        "sửa khóa",
-        "lắp khóa",
-        "khóa cửa bị hỏng",
-        "thay ổ khóa",
-    ],
 }
 
 # Similarity threshold: if confidence > threshold, route to this intent
@@ -280,8 +273,6 @@ def handle_intent(intent: str, query: str, confidence: float) -> Optional[str]:
         return "Dạ Fixago hoạt động 24/7, kể cả cuối tuần và ngày lễ."
     elif intent == "payment_question":
         return "Dạ Fixago nhận thanh toán bằng tiền mặt hoặc chuyển khoản."
-    elif intent == "unsupported_lock":
-        return "Dạ hiện Fixago chưa hỗ trợ thay khóa cửa. Anh/chị cần hỗ trợ dịch vụ nào khác không?"
     else:
         # Intents that need tool calling or LLM
         return None
@@ -305,7 +296,6 @@ if __name__ == "__main__":
         "công ty ở đâu",
         "mấy giờ làm việc",
         "thanh toán bằng cách nào",
-        "thay khóa cửa",
         "bớt tiền được không",  # Synonym for discount
         "cầu dao trip",  # Electrical jargon
         "hôm nay mở cửa không",  # Hours question variation

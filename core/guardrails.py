@@ -161,23 +161,6 @@ _REPAIR_KEYWORDS = [
     "thay", "máy lạnh", "may lanh", "ống nước", "ong nuoc"
 ]
 
-_UNSUPPORTED_KEYWORDS = [
-    "khóa", "khoa", "tivi", "ti vi"
-]
-
-def _is_unsupported_service(text: str) -> bool:
-    import unicodedata
-    import re
-    q = normalize_noaccent((text or "").strip().lower())
-    q_orig = unicodedata.normalize("NFC", (text or "").strip().lower())
-    
-    # We check for explicitly unsupported combinations
-    # Ví dụ: "khóa", "tivi"
-    for kw in _UNSUPPORTED_KEYWORDS:
-        if re.search(r'\b' + re.escape(kw) + r'\b', q) or re.search(r'\b' + re.escape(kw) + r'\b', q_orig):
-            return True
-    return False
-
 def _is_repair_intent(text: str) -> bool:
     try:
         from core.lexicon import FIXAGO_SYNONYMS, SERVICE_GROUPS
@@ -355,13 +338,6 @@ def deterministic_business_reply(query: str) -> str:
     q = normalize_noaccent(q_lower)
     lang = detect_user_language(query)
 
-    # BLOCK UNSUPPORTED SERVICES IMMEDIATELY
-    if _is_unsupported_service(query):
-        if lang == "en":
-            return "Currently, Fixago does not support lock or TV repair services. Do you need help with electrical, plumbing, AC, or construction?"
-        else:
-            return "Dạ hiện Fixago chưa hỗ trợ thay/mở khóa cửa và sửa chữa Tivi. Anh/chị cần hỗ trợ dịch vụ nào khác về điện, nước, điện lạnh hay xây dựng không ạ?"
-
     is_repair = _is_repair_intent(query)
 
     # ONLY answer pure business facts that have nothing to do with repair/booking
@@ -413,16 +389,6 @@ def deterministic_business_reply(query: str) -> str:
             return "Fixago is a trusted home repair platform offering electrical, plumbing, air conditioning, construction, and drywall services. We operate 24/7 in Ho Chi Minh City and provide fast, reliable service."
         else:
             return "Dạ Fixago là nền tảng sửa chữa nhà đáng tin cậy, cung cấp dịch vụ điện, nước, máy lạnh, xây dựng, và thạch cao. Chúng em hoạt động 24/7 ở TP.HCM với dịch vụ nhanh chóng và uy tín."
-
-    # 4. Unsupported service (pure business fact — NOT about repair)
-    if _is_unsupported_service_question(q_lower):
-        if lang == "en":
-            return "Fixago doesn't currently support door lock replacement. Can I help with any other repair services?"
-        else:
-            return (
-                "Dạ hiện Fixago chưa hỗ trợ thay khóa cửa. "
-                "Anh/chị cần hỗ trợ dịch vụ nào khác không?"
-            )
 
     # DO NOT answer service overview, price, promotion, or response time here.
     # Let native tool calling handle those via get_groups, get_services, get_promotions.
@@ -509,18 +475,3 @@ def _is_company_info_question(q_normalized: str) -> bool:
     has_question = any(s in q_normalized for s in question_signals)
 
     return has_company and has_question
-
-
-def _is_unsupported_service_question(q_normalized: str) -> bool:
-    """Check if query asks about unsupported services."""
-    unsupported = [
-        # Door locks
-        "khóa cửa", "lock", "thay khóa", "key",
-        # Kitchen appliances
-        "lò nướng", "oven", "tủ lạnh", "refrigerator", "máy giặt", "washing",
-        "máy sấy", "dryer", "bếp", "stove", "lò vi sóng", "microwave"
-    ]
-    question_signals = ["không", "có", "can", "do", "support"]
-    return any(u in q_normalized for u in unsupported) and any(
-        s in q_normalized for s in question_signals
-    )
