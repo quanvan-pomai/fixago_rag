@@ -761,29 +761,12 @@
         }
 
         async function queryAssistant(text, includeHistory = true) {
-            // Get chat history from DOM (excluding boot message)
-            let history = [];
-            if (includeHistory) {
-                const rows = Array.from(chat.querySelectorAll(".message-row"));
-                // Skip the first TWO rows: boot query + boot response
-                const messageRows = rows.slice(2);
-                history = messageRows
-                    .map(row => {
-                        const msg = row.querySelector(".message");
-                        const sender = row.classList.contains("user-row") ? "user" : "bot";
-                        return { role: sender, content: msg.textContent || msg.innerText };
-                    })
-                    .filter(h => h.content.trim() !== "");
-            }
-
-            console.log("History being sent:", history);
-
             const res = await fetch("/api/v1/rag/query", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    query: text,
-                    history: history
+                    session_id: getChatSessionId(),
+                    query: text
                 })
             });
 
