@@ -142,7 +142,9 @@ def split_multi_questions(query: str) -> list:
     sentences = re.split(r'[.!?]\s+', query.strip())
     sentences = [s.strip() for s in sentences if s.strip()]
 
-    if len(sentences) > 1:
+    # Only treat as multi-question if there's actually a question mark 
+    # and multiple parts, otherwise it just splits normal sentences (like name, address, phone).
+    if len(sentences) > 1 and '?' in query:
         return sentences
 
     # Check for conjunction-based splitting (English)
@@ -179,16 +181,32 @@ def split_multi_questions(query: str) -> list:
             return questions
 
     # Comma-separated (Vietnamese style: "giá sao, thợ qua được không?")
-    if ',' in query and len(query.split(',')) > 1:
+    # ONLY split if the parts contain question words or question marks, otherwise it destroys address/contact info
+    if ',' in query:
+        q_words = ['sao', 'không', 'gì', 'đâu', 'bao nhiêu', 'nào', 'chưa']
         parts = [p.strip() for p in query.split(',')]
-        questions = []
+        
+        # Check if at least one comma separates two actual questions
+        # A part is considered a question if it has a '?' or contains a question word
+        is_multi = False
+        valid_questions = []
         for part in parts:
-            if part and not part.endswith('?'):
-                part += '?'
-            if part:
-                questions.append(part)
-        if len(questions) > 1:
-            return questions
+            if not part: continue
+            part_lower = part.lower()
+            is_q = '?' in part or any(w in part_lower for w in q_words)
+            if is_q and len(part) > 5:
+                valid_questions.append(part)
+        
+        # If we found multiple question-like parts, split them
+        if len(valid_questions) > 1:
+            questions = []
+            for part in parts:
+                if part and not part.endswith('?'):
+                    part += '?'
+                if part:
+                    questions.append(part)
+            if len(questions) > 1:
+                return questions
 
     return [query]
 

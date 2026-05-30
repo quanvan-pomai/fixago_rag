@@ -41,8 +41,7 @@ _GREETING_SERVICE_SIGNALS = [
 ]
 
 _AREA_RESPONSE = (
-    "Dạ Fixago hiện đang phục vụ tại TP. Hồ Chí Minh, cụ thể là Quận 2, Quận 9 và TP. Thủ Đức ạ. "
-    "Anh/chị đang ở khu vực nào để mình xem hỗ trợ được không nhé?"
+    "Fixago đang phục vụ khu vực Quận 2, Quận 9, Thủ Đức thuộc thành phố Hồ Chí Minh."
 )
 
 # Unambiguous area-question phrases — safe to match alone
@@ -156,16 +155,40 @@ _REPAIR_KEYWORDS = [
     "thay", "máy lạnh", "may lanh", "ống nước", "ong nuoc"
 ]
 
-def _is_repair_intent(text: str) -> bool:
+_UNSUPPORTED_KEYWORDS = [
+    "khóa", "khoa", "tivi", "ti vi"
+]
+
+def _is_unsupported_service(text: str) -> bool:
     import unicodedata
     import re
     q = normalize_noaccent((text or "").strip().lower())
     q_orig = unicodedata.normalize("NFC", (text or "").strip().lower())
     
-    for kw in _REPAIR_KEYWORDS:
-        pattern = r'\b' + re.escape(kw) + r'\b'
-        if re.search(pattern, q) or re.search(pattern, q_orig):
+    # We check for explicitly unsupported combinations
+    # Ví dụ: "khóa", "tivi"
+    for kw in _UNSUPPORTED_KEYWORDS:
+        if re.search(r'\b' + re.escape(kw) + r'\b', q) or re.search(r'\b' + re.escape(kw) + r'\b', q_orig):
             return True
+    return False
+
+def _is_repair_intent(text: str) -> bool:
+    try:
+        from core.lexicon import FIXAGO_SYNONYMS, SERVICE_GROUPS
+    except ImportError:
+        return False
+        
+    q_lower = (text or "").strip().lower()
+    
+    # Fast check: explicitly repair-related words
+    repair_explicit = ["sửa", "sua", "hư", "hu", "lỗi", "loi", "hỏng", "hong", "bể", "be", "chập", "chap", "thay", "lắp", "lap", "kiểm tra", "kiem tra"]
+    if any(kw in q_lower for kw in repair_explicit):
+        return True
+
+    for group in SERVICE_GROUPS:
+        for kw in FIXAGO_SYNONYMS.get(group, []):
+            if kw.lower() in q_lower:
+                return True
     return False
 
 
@@ -268,8 +291,11 @@ def is_area_question(query: str, _precomputed: str = "") -> bool:
     q = _precomputed or normalize_noaccent((query or "").lower())
     if any(p in q for p in _AREA_PATTERNS):
         return True
-    # Location names alone are ambiguous ("Em ở Thủ Đức, máy lạnh không lạnh")
-    # Only treat as area question when paired with an explicit coverage question signal
+    import re
+    if re.search(r'(quận \d+|quận [a-zđ]+|hà nội|ha noi|hanoi|đà nẵng|da nang|danang|hải phòng|hai phong|cần thơ|can tho|tân bình|tân phú|bình thạnh|gò vấp|phú nhuận|bình tân|bình chánh|hóc môn|củ chi|nhà bè|cần giờ)', query, re.IGNORECASE):
+        if any(sig in q for sig in _AREA_QUESTION_SIGNALS) or any(p in q for p in _AREA_PATTERNS):
+            return True
+            
     return (
         any(loc in q for loc in _AREA_LOCATION_TERMS)
         and any(sig in q for sig in _AREA_QUESTION_SIGNALS)
@@ -287,6 +313,11 @@ def static_fallback(query: str) -> str:
         return _FIXIE_GREETING
 
     if is_area_question(query, _precomputed=q):
+        import re
+        match = re.search(r'(quận \d+|quận [a-zđ]+|hà nội|ha noi|hanoi|đà nẵng|da nang|danang|hải phòng|hai phong|cần thơ|can tho|tân bình|tân phú|bình thạnh|gò vấp|phú nhuận|bình tân|bình chánh|hóc môn|củ chi|nhà bè|cần giờ)', query, re.IGNORECASE)
+        if match:
+            khu_vuc = match.group(1).title()
+            return f"Fixago đang phục vụ khu vực Quận 2, Quận 9, Thủ Đức thuộc thành phố Hồ Chí Minh. Không phục vụ ở {khu_vuc} đó."
         return _AREA_RESPONSE
 
     return ""
@@ -309,16 +340,22 @@ def deterministic_business_reply(query: str) -> str:
     q = normalize_noaccent(q_lower)
     lang = detect_user_language(query)
 
+    # BLOCK UNSUPPORTED SERVICES IMMEDIATELY
+    if _is_unsupported_service(query):
+        if lang == "en":
+            return "Currently, Fixago does not support lock or TV repair services. Do you need help with electrical, plumbing, AC, or construction?"
+        else:
+            return "Dạ hiện Fixago chưa hỗ trợ thay/mở khóa cửa và sửa chữa Tivi. Anh/chị cần hỗ trợ dịch vụ nào khác về điện, nước, điện lạnh hay xây dựng không ạ?"
+
     is_repair = _is_repair_intent(query)
 
     # ONLY answer pure business facts that have nothing to do with repair/booking
 
-    # 1. Working hours (pure business fact)
     if not is_repair and _is_working_hours_question(q_lower):
         if lang == "en":
-            return "Fixago operates 24/7, including weekends and holidays."
+            return "Our service time is 24/7, we are always available."
         else:
-            return "Dạ Fixago hoạt động 24/7, kể cả cuối tuần và ngày lễ."
+            return "Thời gian phục vụ là 24/7, lúc nào cũng có mặt."
 
     # 2. Payment method (pure business fact)
     if not is_repair and _is_payment_question(q_lower):
@@ -419,29 +456,21 @@ def _is_warranty_question(q_normalized: str) -> bool:
 
 def _is_response_time_question(q_normalized: str) -> bool:
     """Check if query asks about response time or booking methods."""
-    # Vietnamese
-    keywords = ["thời gian", "thoi gian", "đáp ứng", "dap ung", "bao lâu", "bao lau", "bao giờ", "bao gio"]
-    booking_keywords = ["đặt lịch", "dat lich", "lịch hẹn", "lich hen", "booking", "book", "khi nào", "khi nao"]
-
-    # English
-    en_keywords = ["how long", "response time", "confirm", "arrive", "when will"]
-
-    has_time = any(k in q_normalized for k in keywords)
-    has_booking = any(k in q_normalized for k in booking_keywords)
-    has_en = any(k in q_normalized for k in en_keywords)
-
-    return has_time or has_booking or has_en
+    time_signals = ["bao lâu", "bao lau", "mấy phút", "may phut", "khi nào", "khi nao", "thời gian", "thoi gian", "how long", "when will"]
+    tech_signals = ["thợ", "tho", "đến", "den", "qua", "tới", "toi", "arrive", "come"]
+    
+    has_time = any(k in q_normalized for k in time_signals)
+    has_tech = any(k in q_normalized for k in tech_signals)
+    
+    return has_time and has_tech
 
 
 def _is_technician_tracking_question(q_normalized: str) -> bool:
     """Check if query asks about technician tracking or identification."""
-    keywords = ["thợ", "tho", "biết", "biet", "theo dõi", "theo doi", "tracking", "app", "nhân viên", "nhan vien"]
-    question_signals = ["sẽ", "se", "có", "co", "nào", "nao", "đến", "den", "sao", "cách", "cach"]
-
-    has_tech = any(k in q_normalized for k in keywords)
-    has_question = any(s in q_normalized for s in question_signals)
-
-    return has_tech and has_question
+    tracking_signals = ["làm sao biết", "lam sao biet", "theo dõi", "theo doi", "thông tin thợ", "thong tin tho", "tracking", "track"]
+    has_tracking = any(k in q_normalized for k in tracking_signals)
+    
+    return has_tracking
 
 
 def _is_travel_fee_question(q_normalized: str) -> bool:

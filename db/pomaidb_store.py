@@ -55,9 +55,14 @@ SEEDS = [
     (2002, "Khách hàng có thể biết thợ sẽ đến khi nào bằng cách thợ sẽ liên hệ trước khi đến, hoặc khách hàng có thể theo dõi vị trí thợ thông qua ứng dụng mobile của Fixago."),
 
     # FAQ: Travel fee included
-    (2003, "Chi phí dịch vụ của Fixago đã bao gồm phí di chuyển, không phải trả thêm. Giá trên website là giá cuối cùng mà khách hàng sẽ thanh toán."),
-]
+    (2003, "Chi phí dịch vụ của Fixago đã bao gồm phí di chuyển, không phải trả thêm."),
 
+    # FAQ: Location / Service Area
+    (2004, "Fixago đang phục vụ khu vực Quận 2, Quận 9, Thủ Đức thuộc thành phố Hồ Chí Minh. Nếu khách hàng hỏi khu vực khác, hãy trả lời: Không phục vụ ở [Khu vực khách hỏi] đó."),
+
+    # FAQ: Working hours
+    (2005, "Thời gian phục vụ là 24/7, lúc nào cũng có mặt."),
+]
 # ── Internal helpers ─────────────────────────────────────────────────────────
 
 def _validate_doc_id(doc_id: Any) -> int:

@@ -152,8 +152,7 @@ cd ~/fixago_rag
 <summary>For <b>4GB RAM VPS</b> (2 CPU cores)</summary>
 
 ```bash
-nohup env ENABLE_NATIVE_TOOL_CALL=1 \
-./cheesebrain/build/bin/cheese-server \
+nohup ./cheesebrain/build/bin/cheese-server \
   --model ./models/qwen2.5-3b-instruct-q4_k_m.gguf \
   --host 0.0.0.0 \
   --port 8080 \
@@ -171,8 +170,7 @@ nohup env ENABLE_NATIVE_TOOL_CALL=1 \
 <summary>For <b>8GB+ RAM VPS</b> (4 CPU cores)</summary>
 
 ```bash
-nohup env ENABLE_NATIVE_TOOL_CALL=1 \
-./cheesebrain/build/bin/cheese-server \
+nohup ./cheesebrain/build/bin/cheese-server \
   --model ./models/qwen2.5-3b-instruct-q4_k_m.gguf \
   --host 0.0.0.0 \
   --port 8080 \
@@ -217,7 +215,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 
 | Flag | Purpose | Impact if Missing |
 |------|---------|-----------------|
-| `ENABLE_NATIVE_TOOL_CALL=1` | Environment variable enabling tool calling | Tools won't be called; LLM just chats |
+| `ENABLE_NATIVE_TOOL_CALL=1` | Required for RAG server (Terminal 3) | Tools won't be called if not set on Python server |
 | `--chat-template qwen` | Uses Qwen's native function calling format | Wrong format used (Hermes 2 Pro); tools fail |
 | `--n-predict 300` | Max output tokens (allows 2-3 tool calls) | Multi-question queries incomplete |
 | `--ctx-size 4096` | Context window (4GB RAM) | OOM crash if too high |
@@ -274,15 +272,16 @@ cd ~/fixago_rag
 # Activate Python virtual environment
 source venv/bin/activate
 
-# Start the Flask server
+# Start the RAG Server with Native Tool Calling Enabled (CRITICAL)
+export ENABLE_NATIVE_TOOL_CALL=1
 python server.py
 ```
 
 **Expected output:**
 ```
-Seeding complete.
+[SERVER INIT] ENABLE_NATIVE_TOOL_CALL=True
 Starting RAG server on port 8081...
-Running on http://127.0.0.1:8081
+Serving on http://0.0.0.0:8081 with Waitress (threads=20)
 ```
 
 **Verify it's working:**
@@ -467,9 +466,8 @@ Should have a message confirming tool calling is enabled.
 pkill -f cheese-server
 sleep 2
 
-# Restart with BOTH required flags
-nohup env ENABLE_NATIVE_TOOL_CALL=1 \
-./cheesebrain/build/bin/cheese-server \
+# Restart with required flags
+nohup ./cheesebrain/build/bin/cheese-server \
   --model ./models/qwen2.5-3b-instruct-q4_k_m.gguf \
   --host 0.0.0.0 \
   --port 8080 \
@@ -488,11 +486,9 @@ sleep 5
 tail -20 cheese.log | grep "Chat format"
 ```
 
-**Why both flags matter:**
-- `ENABLE_NATIVE_TOOL_CALL=1` → Enables the `/v1/chat/completions` endpoint to accept `tools` parameter
-- `--chat-template qwen` → Tells cheese-server to format function calls using Qwen's native format (NOT Hermes 2 Pro)
-
-Without either flag, the LLM receives the tools parameter but doesn't know how to format responses as function calls.
+**Why these flags matter:**
+- `--chat-template qwen` → Tells cheese-server to format function calls using Qwen's native format
+- `ENABLE_NATIVE_TOOL_CALL=1` MUST be set in Terminal 3 (server.py), without it the system uses legacy routing.
 
 ---
 
@@ -518,8 +514,7 @@ pkill -f cheese-server
 sleep 2
 
 # For multi-questions, use n-predict 350+
-nohup env ENABLE_NATIVE_TOOL_CALL=1 \
-./cheesebrain/build/bin/cheese-server \
+nohup ./cheesebrain/build/bin/cheese-server \
   --model ./models/qwen2.5-3b-instruct-q4_k_m.gguf \
   --host 0.0.0.0 \
   --port 8080 \
@@ -686,8 +681,7 @@ huggingface-cli download Qwen/Qwen2.5-3B-Instruct-GGUF \
 pkill -f cheese-server
 sleep 2
 
-nohup env ENABLE_NATIVE_TOOL_CALL=1 \
-./cheesebrain/build/bin/cheese-server \
+nohup ./cheesebrain/build/bin/cheese-server \
   --model ./models/qwen2.5-3b-instruct-q4_k_m.gguf \
   --host 0.0.0.0 \
   --port 8080 \

@@ -548,11 +548,12 @@ def run_native_tool_path(query: str, history: list, messages: list, used_tools: 
         # HARD-GATE: BLOCK multi-questions BEFORE they reach LLM
         # This is a CRIT GATE - cannot pass unless single question detected
         # Catches both:
-        # - "Services and prices?" (Layer 1: 2 sub-questions)
+        # - "Services and prices?" (Layer 1: 2 sub-questions) -> handled implicitly if lexicon spots multiple infos/services
         # - "sửa ống nước với thay bóng đèn" (Layer 2: 2 services, no punctuation)
 
-        # MUST BE: question_count == 1 AND NOT is_multi_by_lexicon
-        is_definitely_multi = (question_count > 1) or is_multi_by_lexicon
+        # MUST BE: NOT is_multi_by_lexicon
+        # We removed (question_count > 1) because "Do you repair fridges? How much?" has 2 questions but is 1 service intent.
+        is_definitely_multi = is_multi_by_lexicon
 
         if is_definitely_multi:
             lang = detect_user_language(query)
@@ -727,7 +728,6 @@ def run_native_tool_path(query: str, history: list, messages: list, used_tools: 
         "khi nào", "khi nao",
         "thời gian", "thoi gian",
         "mấy phút", "may phut",
-        "xác nhận", "xac nhan",
         "how long",
         "working hours",
         "business hours",
@@ -874,7 +874,6 @@ def run_native_tool_path(query: str, history: list, messages: list, used_tools: 
     ]
     query_lower = query.lower()
     is_info_question = any(kw in query_lower for kw in info_keywords)
-
     # Booking state machine: deterministic slot extraction before LLM routing
     # BUT: Skip booking handler if this is an INFO question (ask for price/warranty/promotion info)
     if not is_info_question:
@@ -885,6 +884,12 @@ def run_native_tool_path(query: str, history: list, messages: list, used_tools: 
                 return handle_create_booking(booking_resp, used_tools)
             return booking_resp
 
+    # ── FAST PATH FOR PROMOTIONS ────────────────────────────────────────────────
+    promo_kws = ["khuyến mãi", "khuyen mai", "ưu đãi", "uu dai", "giảm giá", "giam gia", "voucher", "mã code", "discount", "promo", "mã giảm"]
+    if any(kw in query_lower for kw in promo_kws):
+        from tools.handlers import handle_get_promotions
+        return handle_get_promotions(messages, used_tools)
+
     # ── SEMANTIC ROUTING: ONLY for deterministic facts, not for information queries ─
     # IMPORTANT: Only use semantic router for DETERMINISTIC responses (hours, payment, area, unsupported)
     # Let LLM handle information queries (services, pricing, promotions) with proper tool calling
@@ -893,7 +898,7 @@ def run_native_tool_path(query: str, history: list, messages: list, used_tools: 
     intent, confidence = semantic_route(query)
 
     # Only return deterministic response if it's a DETERMINISTIC intent
-    deterministic_intents = ["hours_question", "payment_question", "unsupported_service", "location_question"]
+    deterministic_intents = ["payment_question", "unsupported_service"]
 
     if intent != "unclear" and intent in deterministic_intents and confidence >= 0.75:
         # Semantic router matched a DETERMINISTIC intent with high confidence
