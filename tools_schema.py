@@ -41,7 +41,7 @@ FIXAGO_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_promotions",
-            "description": "Tra khuyến mãi, giảm giá, voucher, ưu đãi.",
+            "description": "CALL THIS TOOL when user asks about promotions, discounts, vouchers, or special offers. Returns active discounts available now.",
             "parameters": {
                 "type": "object",
                 "properties": {},
