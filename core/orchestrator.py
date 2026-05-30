@@ -445,16 +445,21 @@ def _extract_category_from_groups(query: str) -> str:
     Returns category name (e.g., "điện", "nước") or "unknown" if no match.
     """
     import unicodedata
+    from core.intent_router import normalize_noaccent
     backend_url = os.environ.get("BACKEND_API_URL", "http://127.0.0.1:3001/api/v1")
     query_lower = unicodedata.normalize("NFC", query.strip().lower())
+    query_noaccent = normalize_noaccent(query_lower)
 
     # If asking for general services, return "all" immediately
     general_service_keywords = [
-        "dịch vụ gì", "dich vu gi", "những dịch vụ", "các dịch vụ",
+        "dịch vụ gì", "những dịch vụ", "các dịch vụ",
         "cung cấp gì", "làm gì", "sửa gì"
     ]
-    if any(k in query_lower for k in general_service_keywords) and not any(k in query_lower for k in ["điện", "nước", "lạnh", "xây", "thạch"]):
-        return "all"
+    if any(k in query_lower for k in general_service_keywords) or any(normalize_noaccent(k) in query_noaccent for k in general_service_keywords):
+        # Ensure they are not asking for a specific service alongside the general question
+        specifics = ["điện", "nước", "lạnh", "xây", "thạch"]
+        if not any(k in query_lower for k in specifics) and not any(normalize_noaccent(k) in query_noaccent for k in specifics):
+            return "all"
 
     # High-priority keywords for each category (checked first)
     priority_keywords = {
@@ -467,7 +472,7 @@ def _extract_category_from_groups(query: str) -> str:
 
     # First pass: check priority keywords (exact match, highest scoring)
     for category, keywords in priority_keywords.items():
-        if any(k in query_lower for k in keywords):
+        if any(k in query_lower for k in keywords) or any(normalize_noaccent(k) in query_noaccent for k in keywords):
             return category.lower()
 
     try:
