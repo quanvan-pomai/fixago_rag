@@ -26,7 +26,13 @@ _IDENTITY_PATTERNS = [
     "fixie là ai", "fixie la ai", "fixie là gì", "ai là fixie",
     "em là ai", "em tên gì", "giới thiệu bản thân", "gioi thieu",
     "bạn là gì", "ban la gi",
+    # English name / identity
+    "what is your name", "what's your name", "whats your name",
+    "your name", "tell me about yourself", "introduce yourself",
+    "what are you", "are you a bot", "are you ai",
+    "what can you do", "what do you do",
 ]
+
 
 _GREETING_PATTERNS = [
     "xin chào", "xin chao", "chào bạn", "chao ban", "hello", "hi fixie",
@@ -310,7 +316,16 @@ def static_fallback(query: str) -> str:
     q = normalize_noaccent((query or "").strip().lower())
 
     if is_greeting_or_identity(query, _precomputed=q):
+        from core.intent_router import detect_user_language
+        if detect_user_language(query) == "en":
+            return (
+                "Welcome to Fixago — your trusted home repair & construction service platform. "
+                "I'm Fixie, Fixago's virtual assistant, happy to help! "
+                "I can assist with electrical, plumbing, air conditioning, and construction services, "
+                "as well as booking a technician to your home."
+            )
         return _FIXIE_GREETING
+
 
     if is_area_question(query, _precomputed=q):
         import re
