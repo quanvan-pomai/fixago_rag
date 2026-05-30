@@ -1,0 +1,108 @@
+{
+  "timestamp": "2026-05-30T15:14:05.672179",
+  "summary": {
+    "total": 16,
+    "passed": 16,
+    "failed": 0,
+    "timeout": 0,
+    "success_rate": 100
+  },
+  "details": [
+    {
+      "name": "Deterministic: Hours",
+      "passed": true,
+      "reason": "",
+      "timestamp": "2026-05-30T15:13:33.096183"
+    },
+    {
+      "name": "Deterministic: Payment",
+      "passed": true,
+      "reason": "",
+      "timestamp": "2026-05-30T15:13:33.101683"
+    },
+    {
+      "name": "Info: Pricing question",
+      "passed": true,
+      "reason": "",
+      "timestamp": "2026-05-30T15:13:37.154191"
+    },
+    {
+      "name": "Info: Warranty question",
+      "passed": true,
+      "reason": "",
+      "timestamp": "2026-05-30T15:13:37.159987"
+    },
+    {
+      "name": "Info: Promotion question",
+      "passed": true,
+      "reason": "",
+      "timestamp": "2026-05-30T15:13:41.262528"
+    },
+    {
+      "name": "Info: Hours question",
+      "passed": true,
+      "reason": "",
+      "timestamp": "2026-05-30T15:13:41.271258"
+    },
+    {
+      "name": "Info: Area question",
+      "passed": true,
+      "reason": "",
+      "timestamp": "2026-05-30T15:13:41.279607"
+    },
+    {
+      "name": "Unsupported: Door lock",
+      "passed": true,
+      "reason": "",
+      "timestamp": "2026-05-30T15:13:41.287167"
+    },
+    {
+      "name": "Unsupported: Oven",
+      "passed": true,
+      "reason": "",
+      "timestamp": "2026-05-30T15:13:41.294781"
+    },
+    {
+      "name": "Unsupported: Refrigerator repair",
+      "passed": true,
+      "reason": "",
+      "timestamp": "2026-05-30T15:13:41.302791"
+    },
+    {
+      "name": "Multi: Services + Prices",
+      "passed": true,
+      "reason": "",
+      "timestamp": "2026-05-30T15:13:41.311473"
+    },
+    {
+      "name": "Multi: Service + Warranty (Single query allowed)",
+      "passed": true,
+      "reason": "",
+      "timestamp": "2026-05-30T15:13:51.086434"
+    },
+    {
+      "name": "Multi: Multiple services",
+      "passed": true,
+      "reason": "",
+      "timestamp": "2026-05-30T15:13:51.093633"
+    },
+    {
+      "name": "Repair: AC not cooling",
+      "passed": true,
+      "reason": "",
+      "timestamp": "2026-05-30T15:13:55.884432"
+    },
+    {
+      "name": "Repair: Electrical short circuit",
+      "passed": true,
+      "reason": "",
+      "timestamp": "2026-05-30T15:14:00.745253"
+    },
+    {
+      "name": "Repair: Water leak",
+      "passed": true,
+      "reason": "",
+      "timestamp": "2026-05-30T15:14:05.672067"
+    }
+  ]
+}

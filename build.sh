@@ -18,15 +18,11 @@ echo "[3/6] Building pomaidb..."
 make pomaidb
 
 echo ""
-echo "[4/6] Building pomaicache..."
+echo "[4/5] Building pomaicache..."
 make pomaicache
 
 echo ""
-echo "[5/6] Building cheesepath..."
-make cheesepath
-
-echo ""
-echo "[6/6] Setting up Python virtual environment..."
+echo "[5/5] Setting up Python virtual environment..."
 python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip

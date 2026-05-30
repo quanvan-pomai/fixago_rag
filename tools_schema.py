@@ -20,7 +20,7 @@ FIXAGO_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_services",
-            "description": "CALL THIS TOOL when user asks about price/cost OR describes repair issue. INFER category: 'ổ cắm'/socket/outlet/electrical → 'điện'; 'nước'/water/leak/rò rỉ → 'nước'; 'máy lạnh'/AC/cold → 'máy lạnh'; 'xây dựng'/construction/build → 'xây dựng'; 'thạch cao'/drywall → 'thạch cao'. Use 'all' if unclear.",
+            "description": "Get service prices. CRITICAL: Extract category from user message. Examples: 'điện chập' → category='điện' | 'nước rò rỉ' → category='nước' | 'máy lạnh không lạnh' → category='máy lạnh' | 'sơn, xây dựng' → category='xây dựng' | 'thạch cao' → category='thạch cao' | unclear → category='all'. NEVER use 'all' if user mentioned a specific service type.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -28,8 +28,10 @@ FIXAGO_TOOLS = [
                         "type": "string",
                         "enum": ["điện", "nước", "máy lạnh", "xây dựng", "thạch cao", "all"],
                         "description": (
-                            "Choose category from context: điện (electrical), nước (plumbing), máy lạnh (AC), "
-                            "xây dựng (construction), thạch cao (drywall), or 'all' if unsure."
+                            "Service category: 'điện' (electrical - chập điện, ổ cắm, công tắc, aptomat), "
+                            "'nước' (plumbing - rò rỉ, tắc cống), 'máy lạnh' (AC - điều hòa, lạnh), "
+                            "'xây dựng' (construction - sơn, tôn), 'thạch cao' (drywall - trần), "
+                            "or 'all' ONLY if category unclear."
                         ),
                     }
                 },

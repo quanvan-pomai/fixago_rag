@@ -1,0 +1,98 @@
+[
+  {
+    "category": "SERVICE_OVERVIEW",
+    "query": "công ty em có thể cung cấp dịch vụ gì",
+    "response": "Dạ Giá sửa điện tham khảo: **120.000 VNĐ – 300.000 VNĐ**.\n• Đi dây điện, đi ống âm tường: 120.000 VNĐ, ~60 phút\n• Điện nước âm tường: 120.000 VNĐ, ~60 phút\n• Sửa chập điện, mất điện: 150.000 VNĐ, ~60 ",
+    "timestamp": "2026-05-30T15:18:11.737948"
+  },
+  {
+    "category": "PRICING",
+    "query": "chi phí cụ thể các dịch vụ thế nào",
+    "response": "Dạ Giá sửa điện tham khảo: **120.000 VNĐ – 300.000 VNĐ**.\n• Đi dây điện, đi ống âm tường: 120.000 VNĐ, ~60 phút\n• Điện nước âm tường: 120.000 VNĐ, ~60 phút\n• Sửa chập điện, mất điện: 150.000 VNĐ, ~60 ",
+    "timestamp": "2026-05-30T15:18:15.544399"
+  },
+  {
+    "category": "LOCATION",
+    "query": "công ty của em ở đâu",
+    "response": "Dạ Fixago hiện đang phục vụ tại TP. Hồ Chí Minh, cụ thể là Quận 2, Quận 9 và TP. Thủ Đức ạ. Anh/chị đang ở khu vực nào để mình xem hỗ trợ được không nhé?",
+    "timestamp": "2026-05-30T15:18:15.549415"
+  },
+  {
+    "category": "RESPONSE_TIME",
+    "query": "thời gian đáp ứng và cách đặt lịch ra sao",
+    "response": "Dạ Fixago đây ạ! Do tin nhắn của mình hơi dài nên hệ thống bên em đọc chưa hiểu hết ý. Anh/chị có thể chia nhỏ từng câu hỏi giúp em được không ạ? Em cảm ơn nhiều!",
+    "timestamp": "2026-05-30T15:18:15.554813"
+  },
+  {
+    "category": "TECHNICIAN_TRACK",
+    "query": "làm sao biết đúng thợ sẽ đến",
+    "response": "Dạ Tổng quan giá tham khảo: **150.000 VNĐ – 250.000 VNĐ**.\n• Sửa chập điện, mất điện: 150.000 VNĐ, ~60 phút\n• Sửa rò rỉ đường ống nước: 150.000 VNĐ, ~60 phút\n• Thay aptomat, tủ điện: 200.000 VNĐ, ~60 ",
+    "timestamp": "2026-05-30T15:18:19.600669"
+  },
+  {
+    "category": "TRAVEL_FEE",
+    "query": "chi phí này bao gồm chi phí di chuyển chưa",
+    "response": "Dạ Giá sửa điện tham khảo: **120.000 VNĐ – 300.000 VNĐ**.\n• Đi dây điện, đi ống âm tường: 120.000 VNĐ, ~60 phút\n• Điện nước âm tường: 120.000 VNĐ, ~60 phút\n• Sửa chập điện, mất điện: 150.000 VNĐ, ~60 ",
+    "timestamp": "2026-05-30T15:18:25.582677"
+  },
+  {
+    "category": "REPAIR_REQUEST",
+    "query": "anh muốn sửa chữa phòng bếp nhà anh",
+    "response": "Dạ Giá sửa điện tham khảo: **120.000 VNĐ – 300.000 VNĐ**.\n• Đi dây điện, đi ống âm tường: 120.000 VNĐ, ~60 phút\n• Điện nước âm tường: 120.000 VNĐ, ~60 phút\n• Sửa chập điện, mất điện: 150.000 VNĐ, ~60 ",
+    "timestamp": "2026-05-30T15:18:30.524506"
+  },
+  {
+    "category": "REPAIR_REQUEST",
+    "query": "anh muốn thay bóng đèn trên trần nhà",
+    "response": "Dạ Fixago đây ạ! Do tin nhắn của mình hơi dài nên hệ thống bên em đọc chưa hiểu hết ý. Anh/chị có thể chia nhỏ từng câu hỏi giúp em được không ạ? Em cảm ơn nhiều!",
+    "timestamp": "2026-05-30T15:18:30.531760"
+  },
+  {
+    "category": "REPAIR_REQUEST",
+    "query": "anh muốn lắp đặt máy lạnh mới mua",
+    "response": "Dạ Giá sửa máy lạnh tham khảo: **250.000 VNĐ**.\n• Lắp đặt, vệ sinh máy lạnh: 250.000 VNĐ, ~60 phút\nThợ sẽ xác nhận chi phí chính xác trước khi làm. Bạn muốn đặt lịch không ạ?",
+    "timestamp": "2026-05-30T15:18:35.538434"
+  },
+  {
+    "category": "REPAIR_REQUEST",
+    "query": "anh muốn thay thế ống nước vừa bị bể gấp",
+    "response": "Dạ mình hỗ trợ bạn đặt lịch được ạ. Bạn cho Fixago xin họ tên, số điện thoại và địa chỉ cần sửa nhé.",
+    "timestamp": "2026-05-30T15:18:35.546265"
+  },
+  {
+    "category": "UNSUPPORTED",
+    "query": "bên em có hỗ trợ thay khóa cửa không",
+    "response": "Dạ hiện Fixago chưa hỗ trợ thay khóa cửa. Anh/chị cần hỗ trợ dịch vụ nào khác không?",
+    "timestamp": "2026-05-30T15:18:35.553535"
+  },
+  {
+    "category": "PAYMENT",
+    "query": "thanh toán bằng cách nào",
+    "response": "Dạ Fixago nhận thanh toán bằng tiền mặt hoặc chuyển khoản.",
+    "timestamp": "2026-05-30T15:18:35.561009"
+  },
+  {
+    "category": "COMPANY_INTRO_EN",
+    "query": "can you introduce about your company and services",
+    "response": "Hi there! Your message is quite long, so I might miss something. Could you please break it down into separate questions? Thanks!",
+    "timestamp": "2026-05-30T15:18:35.570308"
+  },
+  {
+    "category": "RESPONSE_TIME_EN",
+    "query": "how long for you to confirm",
+    "response": "Typical price range for all: 150.000 VNĐ – 250.000 VNĐ.\n• Sửa chập điện, mất điện: 150.000 VNĐ, ~60 min\n• Thay aptomat, tủ điện: 200.000 VNĐ, ~60 min\n• Sửa rò rỉ đường ống nước: 150.000 VNĐ, ~60 min\n•",
+    "timestamp": "2026-05-30T15:18:40.521124"
+  },
+  {
+    "category": "PRICING_EN",
+    "query": "how about the pricing",
+    "response": "Fixago accepts cash or bank transfer.",
+    "timestamp": "2026-05-30T15:18:40.529153"
+  },
+  {
+    "category": "REPAIR_EN",
+    "query": "i need to maintenance my air conditioner",
+    "response": "Typical price range for all: 150.000 VNĐ – 250.000 VNĐ.\n• Sửa chập điện, mất điện: 150.000 VNĐ, ~60 min\n• Thay aptomat, tủ điện: 200.000 VNĐ, ~60 min\n• Sửa rò rỉ đường ống nước: 150.000 VNĐ, ~60 min\n•",
+    "timestamp": "2026-05-30T15:18:45.415020"
+  }
+]

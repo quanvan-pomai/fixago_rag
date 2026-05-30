@@ -42,6 +42,7 @@ _memory_retriever = MemoryRetriever()
 _memory_writer = get_default_writer()
 
 ENABLE_NATIVE_TOOL_CALL = os.environ.get("ENABLE_NATIVE_TOOL_CALL", "1") in ("1", "true", "yes")
+print(f"[SERVER INIT] ENABLE_NATIVE_TOOL_CALL={ENABLE_NATIVE_TOOL_CALL}", flush=True)
 
 app = Flask(__name__)
 

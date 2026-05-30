@@ -5,12 +5,12 @@
 #   make clean    - Remove build directories and clean binaries
 #   make status   - Show status of submodules
 
-.PHONY: all clean status cheesebrain pomaidb pomaicache cheesepath submodule-check help
+.PHONY: all clean status cheesebrain pomaidb pomaicache submodule-check help
 
 # Determine number of processor cores for parallel build
 NPROC ?= $(shell nproc 2>/dev/null || echo 4)
 
-all: cheesebrain pomaidb pomaicache cheesepath
+all: cheesebrain pomaidb pomaicache
 	@echo "============================================="
 	@echo " All submodules built successfully!          "
 	@echo "============================================="
@@ -21,7 +21,6 @@ help:
 	@echo "  make cheesebrain  - Build cheesebrain (CMake)"
 	@echo "  make pomaidb      - Build pomaidb (CMake)"
 	@echo "  make pomaicache   - Build pomaicache (CMake)"
-	@echo "  make cheesepath   - Build cheesepath (Go)"
 	@echo "  make clean        - Clean all builds"
 	@echo "  make status       - Check git submodules status"
 
@@ -29,8 +28,7 @@ help:
 submodule-check:
 	@if [ ! -f cheesebrain/CMakeLists.txt ] || \
 	    [ ! -f pomaidb/CMakeLists.txt ] || \
-	    [ ! -f pomaicache/CMakeLists.txt ] || \
-	    [ ! -f cheesepath/go.mod ]; then \
+	    [ ! -f pomaicache/CMakeLists.txt ]; then \
 		echo "Submodules appear to be missing or uninitialized. Initializing..."; \
 		git submodule update --init --recursive; \
 	fi
@@ -59,22 +57,18 @@ pomaidb: submodule-check
 pomaicache: submodule-check
 	@echo "--- Building pomaicache ---"
 	mkdir -p pomaicache/build
+	pybind11_dir=$$(python3 -c "import pybind11; print(pybind11.get_cmake_dir())"); \
 	cmake -S pomaicache -B pomaicache/build \
 		-DCMAKE_BUILD_TYPE=Release \
-		-DBUILD_PYTHON_BINDINGS=ON
+		-DBUILD_PYTHON_BINDINGS=OFF \
+		-Dpybind11_DIR="$$pybind11_dir"
 	cmake --build pomaicache/build -j$(NPROC)
-
-# 4. cheesepath
-cheesepath: submodule-check
-	@echo "--- Building cheesepath ---"
-	cd cheesepath && go build ./...
 
 clean:
 	@echo "--- Cleaning build files ---"
 	rm -rf cheesebrain/build
 	rm -rf pomaidb/build
 	rm -rf pomaicache/build
-	cd cheesepath && go clean 2>/dev/null || true
 	@echo "Clean completed."
 
 status:

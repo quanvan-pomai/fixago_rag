@@ -203,14 +203,30 @@ def execute_create_booking(
 
     try:
         service_id, _ = resolve_service_id(description)
+
+        # Validate and normalize phone number
+        phone_clean = phone.strip().replace(" ", "").replace("-", "")
+        if not re.match(r'^\+?[0-9]{7,20}$', phone_clean):
+            return "Dạ số điện thoại không hợp lệ. Vui lòng cung cấp số điện thoại đúng (7-20 chữ số)."
+
+        # Payload structure matches backend CreateBookingDto exactly
         payload = {
-            "guestPhone":   phone,
+            "guestPhone":   phone_clean,
             "contactName":  name,
-            "contactPhone": phone,
-            "address":      {"addressLine": address},
-            "priority":     0,
+            "contactPhone": phone_clean,
+            "address": {
+                "label": "Chưa xác định",
+                "addressLine": address,
+            },
+            "priority": 0,  # 0=Normal, 1=ASAP
             "customerNote": description,
-            "details":      [{"serviceId": service_id, "quantity": 1}],
+            "details": [
+                {
+                    "serviceId": service_id,
+                    "servicePackageId": 1,  # Default: Basic package
+                    "quantity": 1,
+                }
+            ],
         }
         resp = requests.post(f"{BACKEND_URL}/bookings", json=payload, timeout=5)
 
@@ -218,14 +234,17 @@ def execute_create_booking(
             booking_code = resp.json().get("bookingCode", "N/A")
             return (
                 f"Đặt lịch thành công rồi ạ! Mã đơn: {booking_code}. "
-                f"Khách hàng: {name} | SĐT: {phone} | Địa chỉ: {address}. "
+                f"Khách hàng: {name} | SĐT: {phone_clean} | Địa chỉ: {address}. "
                 f"Vấn đề: {description}. "
                 "Thợ Fixago sẽ liên hệ sớm để hỗ trợ bạn nhé."
             )
 
-        return f"Xin lỗi, hiện mình không thể tạo đơn lúc này. Lỗi: {resp.text[:200]}"
+        error_msg = resp.text[:200]
+        logger.error(f"Booking creation failed: {resp.status_code} {error_msg}")
+        return f"Xin lỗi, hiện mình không thể tạo đơn lúc này. Lỗi: {error_msg}"
 
     except Exception as exc:
+        logger.exception(f"execute_create_booking exception: {exc}")
         return f"Xin lỗi, hiện mình không thể tạo đơn lúc này. Lỗi: {exc}"
 
 

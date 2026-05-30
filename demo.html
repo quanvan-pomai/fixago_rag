@@ -765,8 +765,8 @@
             let history = [];
             if (includeHistory) {
                 const rows = Array.from(chat.querySelectorAll(".message-row"));
-                // Only include user/bot messages AFTER the first message (boot message)
-                const messageRows = rows.slice(hasBooted && rows.length > 0 ? 1 : 0);
+                // Skip the first TWO rows: boot query + boot response
+                const messageRows = rows.slice(2);
                 history = messageRows
                     .map(row => {
                         const msg = row.querySelector(".message");
@@ -775,6 +775,8 @@
                     })
                     .filter(h => h.content.trim() !== "");
             }
+
+            console.log("History being sent:", history);
 
             const res = await fetch("/api/v1/rag/query", {
                 method: "POST",

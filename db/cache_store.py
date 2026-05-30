@@ -35,23 +35,37 @@ class CacheStore:
         try:
             import pomaicache as _pomaicache
         except Exception as exc:
-            raise RuntimeError(f"Cannot import pomaicache from {pomaicache_build_dir}: {exc}") from exc
+            logger.warning(f"Cannot import pomaicache from {pomaicache_build_dir}: {exc}")
+            _pomaicache = None
 
         pomaicache_dir.mkdir(parents=True, exist_ok=True)
 
-        self._cache = _pomaicache.Cache(
-            data_dir=str(pomaicache_dir),
-            memory_limit_bytes=RAG_CACHE_MEMORY_LIMIT_BYTES,
-        )
+        self._cache = None
         self._kv_fallback: dict[str, tuple[bytes, float | None]] = {}
-        self._has_native_kv = hasattr(self._cache, "get") and hasattr(self._cache, "set")
-        if not self._has_native_kv:
-            logger.warning(
-                "PomaiCache binding has no key-value get/set API; using process-local KV fallback. "
-                "Rebuild pomaicache to enable native persistent session/memory cache."
-            )
+
+        self._has_native_kv = False
+        if _pomaicache and hasattr(_pomaicache, "Cache"):
+            try:
+                self._cache = _pomaicache.Cache(
+                    data_dir=str(pomaicache_dir),
+                    memory_limit_bytes=RAG_CACHE_MEMORY_LIMIT_BYTES,
+                )
+                self._has_native_kv = hasattr(self._cache, "get") and hasattr(self._cache, "set")
+                if not self._has_native_kv:
+                    logger.warning(
+                        "PomaiCache binding has no key-value get/set API; using process-local KV fallback. "
+                        "Rebuild pomaicache to enable native persistent session/memory cache."
+                    )
+            except Exception as exc:
+                logger.warning(f"Failed to initialize PomaiCache: {exc}. Using in-memory fallback.")
+                self._cache = None
+                self._has_native_kv = False
+        else:
+            logger.info("PomaiCache not available; using in-memory KV fallback.")
+            self._has_native_kv = False
+
         self._lock = lock
-        logger.info("PomaiCache initialized at %s", pomaicache_dir)
+        logger.info("Cache initialized (native=%s) at %s", self._has_native_kv, pomaicache_dir)
 
     # ── Key-value cache ──────────────────────────────────────────────────────
 
