@@ -98,7 +98,7 @@ _OFFTOPIC_VI_KEYWORDS = [
     "trò chơi", "tro choi", "game", "chơi game", "choi game",
 
     # Education (not related to home repair)
-    "học", "hoc", "kiến thức", "kien thuc", "toán", "toan", "tiếng anh", "tieng anh",
+    "học", "hoc", "kiến thức", "kien thuc", "toán học", "toan hoc", "tiếng anh", "tieng anh",
     "làm bài", "lam bai", "đồ họa", "do hoa", "lập trình", "lap trinh",
 
     # Jobs/Career (not home repair)
@@ -149,6 +149,26 @@ _OFFTOPIC_EN_KEYWORDS = [
     "car", "motorcycle", "bike", "vehicle", "transport", "drive",
 ]
 
+_REPAIR_KEYWORDS = [
+    "sửa", "sua", "hư", "hu", "lỗi", "loi", "hỏng", "hong", 
+    "bể", "be", "chập", "chap", "cúp điện", "cup dien", "mất hình", 
+    "lắp đặt", "lap dat", "sơn", "son", "khóa", "khoa",
+    "thay", "máy lạnh", "may lanh", "ống nước", "ong nuoc"
+]
+
+def _is_repair_intent(text: str) -> bool:
+    import unicodedata
+    import re
+    q = normalize_noaccent((text or "").strip().lower())
+    q_orig = unicodedata.normalize("NFC", (text or "").strip().lower())
+    
+    for kw in _REPAIR_KEYWORDS:
+        pattern = r'\b' + re.escape(kw) + r'\b'
+        if re.search(pattern, q) or re.search(pattern, q_orig):
+            return True
+    return False
+
+
 
 def is_prompt_injection(query: str) -> bool:
     q = (query or "").strip().lower()
@@ -164,8 +184,12 @@ def is_offtopic(query: str) -> bool:
     Special case: Exclude Vietnamese location names that contain off-topic keywords
     (e.g., "Cần Thơ" contains "thơ" but is a city name).
     """
+    if _is_repair_intent(query):
+        return False
+
+    import unicodedata
     q = normalize_noaccent((query or "").strip().lower())
-    q_orig = ((query or "").strip().lower())
+    q_orig = unicodedata.normalize("NFC", (query or "").strip().lower())
 
     # Vietnamese location names that contain off-topic keywords but are not off-topic
     # Check both accented and non-accented versions
@@ -279,57 +303,60 @@ def deterministic_business_reply(query: str) -> str:
     those must go through native tool calling (get_services, get_groups, get_promotions).
     """
     from core.intent_router import detect_user_language
+    import unicodedata
 
-    q_lower = (query or "").strip().lower()
+    q_lower = unicodedata.normalize("NFC", (query or "").strip().lower())
     q = normalize_noaccent(q_lower)
     lang = detect_user_language(query)
+
+    is_repair = _is_repair_intent(query)
 
     # ONLY answer pure business facts that have nothing to do with repair/booking
 
     # 1. Working hours (pure business fact)
-    if _is_working_hours_question(q_lower):
+    if not is_repair and _is_working_hours_question(q_lower):
         if lang == "en":
             return "Fixago operates 24/7, including weekends and holidays."
         else:
             return "Dạ Fixago hoạt động 24/7, kể cả cuối tuần và ngày lễ."
 
     # 2. Payment method (pure business fact)
-    if _is_payment_question(q_lower):
+    if not is_repair and _is_payment_question(q_lower):
         if lang == "en":
             return "Fixago accepts cash or bank transfer."
         else:
             return "Dạ Fixago nhận thanh toán bằng tiền mặt hoặc chuyển khoản."
 
     # 2.5. Warranty/guarantee (pure business fact)
-    if _is_warranty_question(q_lower):
+    if not is_repair and _is_warranty_question(q_lower):
         if lang == "en":
             return "Warranty is 30 days from the service date. If the issue was caused by our technician, we will fix it free of charge."
         else:
             return "Dạ bảo hành là 30 ngày từ ngày thực hiện dịch vụ. Nếu lỗi do kỹ thuật viên của chúng em gây ra, chúng em sửa lại miễn phí ạ."
 
     # 3. Response time & booking methods (FAQ)
-    if _is_response_time_question(q_lower):
+    if not is_repair and _is_response_time_question(q_lower):
         if lang == "en":
             return "Our response time is typically 15-30 minutes, depending on your location. You can book a technician anytime through our website, mobile app, or by contacting us directly."
         else:
             return "Dạ thời gian đáp ứng tùy vào vị trí của anh/chị, tầm 15-30 phút. Anh/chị có thể đặt lịch bất kỳ lúc nào qua website, app, hoặc liên hệ trực tiếp với chúng em."
 
     # 3.5. Technician tracking (FAQ)
-    if _is_technician_tracking_question(q_lower):
+    if not is_repair and _is_technician_tracking_question(q_lower):
         if lang == "en":
             return "The technician will contact you before arrival. You can also track progress through our app."
         else:
             return "Dạ thợ sẽ liên hệ anh/chị ngay trước khi đến. Anh/chị cũng có thể theo dõi thợ qua app."
 
     # 3.7. Travel fee (FAQ)
-    if _is_travel_fee_question(q_lower):
+    if not is_repair and _is_travel_fee_question(q_lower):
         if lang == "en":
             return "Travel fee is already included in the price. No additional charges."
         else:
             return "Dạ phí di chuyển đã bao gồm trong giá dịch vụ ạ, không phải trả thêm."
 
     # 3.9. Company info (FAQ)
-    if _is_company_info_question(q_lower):
+    if not is_repair and _is_company_info_question(q_lower):
         if lang == "en":
             return "Fixago is a trusted home repair platform offering electrical, plumbing, air conditioning, construction, and drywall services. We operate 24/7 in Ho Chi Minh City and provide fast, reliable service."
         else:
@@ -437,7 +464,7 @@ def _is_company_info_question(q_normalized: str) -> bool:
     has_company = any(k in q_normalized for k in keywords)
     has_question = any(s in q_normalized for s in question_signals)
 
-    return has_company or has_question
+    return has_company and has_question
 
 
 def _is_unsupported_service_question(q_normalized: str) -> bool:
