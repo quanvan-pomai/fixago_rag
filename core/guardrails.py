@@ -467,11 +467,8 @@ def _is_travel_fee_question(q_normalized: str) -> bool:
 
 
 def _is_company_info_question(q_normalized: str) -> bool:
-    """Check if query asks about company info or services."""
-    keywords = ["công ty", "cong ty", "giới thiệu", "gioi thieu", "về", "company", "introduce", "about", "services", "what"]
-    question_signals = ["nào", "nao", "gì", "gi", "can you", "could you", "do you"]
-
+    """Check if query specifically asks for company background/intro (excluding services)."""
+    # Strict matching to avoid intercepting "công ty có dịch vụ sửa điện không"
+    keywords = ["giới thiệu về", "gioi thieu ve", "thông tin công ty", "thong tin cong ty", "lịch sử công ty", "ai thành lập"]
     has_company = any(k in q_normalized for k in keywords)
-    has_question = any(s in q_normalized for s in question_signals)
-
-    return has_company and has_question
+    return has_company

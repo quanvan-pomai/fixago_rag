@@ -448,6 +448,14 @@ def _extract_category_from_groups(query: str) -> str:
     backend_url = os.environ.get("BACKEND_API_URL", "http://127.0.0.1:3001/api/v1")
     query_lower = unicodedata.normalize("NFC", query.strip().lower())
 
+    # If asking for general services, return "all" immediately
+    general_service_keywords = [
+        "dịch vụ gì", "dich vu gi", "những dịch vụ", "các dịch vụ",
+        "cung cấp gì", "làm gì", "sửa gì"
+    ]
+    if any(k in query_lower for k in general_service_keywords) and not any(k in query_lower for k in ["điện", "nước", "lạnh", "xây", "thạch"]):
+        return "all"
+
     # High-priority keywords for each category (checked first)
     priority_keywords = {
         "Điện": ["điện", "ổ cắm", "công tắc", "đèn", "chiếu sáng", "aptomat"],
