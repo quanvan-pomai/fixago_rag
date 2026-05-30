@@ -54,6 +54,245 @@ def index():
     return send_file("demo.html")
 
 
+@app.route("/api/v1/openapi.json", methods=["GET"])
+def openapi_spec():
+    spec = {
+        "openapi": "3.0.3",
+        "info": {
+            "title": "Fixago RAG API",
+            "version": "1.0.0",
+            "description": (
+                "Agentic Booking Engine — hỏi về dịch vụ, giá, khuyến mãi và đặt lịch thợ. "
+                "Gửi `session_id` để duy trì hội thoại multi-turn."
+            ),
+        },
+        "servers": [{"url": "/"}],
+        "paths": {
+            "/api/v1/rag/query": {
+                "post": {
+                    "summary": "Gửi câu hỏi / đặt lịch",
+                    "description": (
+                        "Endpoint chính của hệ thống. Nhận câu hỏi tự nhiên (tiếng Việt / tiếng Anh), "
+                        "xử lý qua guardrails → orchestrator → native tool calling → LLM và trả về câu trả lời. "
+                        "Dùng cùng `session_id` cho toàn bộ cuộc hội thoại để giữ context."
+                    ),
+                    "operationId": "ragQuery",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["query"],
+                                    "properties": {
+                                        "session_id": {
+                                            "type": "string",
+                                            "description": "UUID phiên hội thoại. Tạo 1 lần và gửi lại mọi turn. Nếu bỏ qua, server tự sinh mới (mất context).",
+                                            "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                                        },
+                                        "query": {
+                                            "type": "string",
+                                            "description": "Câu hỏi hoặc yêu cầu của khách hàng.",
+                                            "example": "Máy lạnh nhà tôi không lạnh, bao nhiêu tiền sửa?"
+                                        }
+                                    }
+                                },
+                                "examples": {
+                                    "hoi_gia_may_lanh": {
+                                        "summary": "Hỏi giá sửa máy lạnh",
+                                        "value": {"session_id": "abc-123", "query": "Sửa máy lạnh không lạnh bao nhiêu?"}
+                                    },
+                                    "hoi_khu_vuc": {
+                                        "summary": "Hỏi khu vực phục vụ",
+                                        "value": {"session_id": "abc-123", "query": "Fixago phục vụ ở khu vực nào?"}
+                                    },
+                                    "hoi_gio_lam_viec": {
+                                        "summary": "Hỏi giờ làm việc",
+                                        "value": {"session_id": "abc-123", "query": "Fixago làm việc mấy giờ?"}
+                                    },
+                                    "dat_lich_day_du": {
+                                        "summary": "Đặt lịch 1-shot đầy đủ thông tin",
+                                        "value": {"session_id": "abc-123", "query": "Tôi tên Minh, sđt 0909111222, ở 45 Trần Phú. Ống nước bị rò, đặt lịch giúp tôi."}
+                                    },
+                                    "hoi_ngoai_khu_vuc": {
+                                        "summary": "Hỏi ngoài khu vực phục vụ",
+                                        "value": {"session_id": "abc-123", "query": "Tôi ở Hà Nội, Fixago có tới sửa không?"}
+                                    },
+                                    "hoi_khuyen_mai": {
+                                        "summary": "Hỏi khuyến mãi",
+                                        "value": {"session_id": "abc-123", "query": "Fixago có khuyến mãi gì không?"}
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Câu trả lời từ AI",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "status": {"type": "string", "example": "success"},
+                                            "session_id": {"type": "string", "example": "a1b2c3d4-..."},
+                                            "response": {"type": "string", "example": "Dạ giá sửa máy lạnh tham khảo: 250.000 VNĐ..."},
+                                            "source": {"type": "string", "enum": ["llm", "cache", "guardrail"], "example": "llm"},
+                                            "tool_calls": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                                "example": ["get_services(category=maylanh)"]
+                                            },
+                                            "cache_metrics": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "hit": {"type": "boolean"},
+                                                    "cached_tokens": {"type": "integer"},
+                                                    "savings_ratio": {"type": "number"}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "tags": ["RAG Query"]
+                }
+            },
+            "/api/v1/rag/ingest": {
+                "post": {
+                    "summary": "Nạp tài liệu vào vector DB",
+                    "operationId": "ragIngest",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["doc_id", "text"],
+                                    "properties": {
+                                        "doc_id": {"type": "integer", "example": 9001},
+                                        "text": {"type": "string", "example": "Fixago cung cấp dịch vụ sửa điện, nước..."}
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {"description": "Ingest thành công"},
+                        "400": {"description": "Thiếu tham số"},
+                        "500": {"description": "Lỗi server"}
+                    },
+                    "tags": ["Admin"]
+                }
+            },
+            "/api/v1/rag/retrieve": {
+                "post": {
+                    "summary": "Tìm kiếm vector DB (RAG context)",
+                    "operationId": "ragRetrieve",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["query"],
+                                    "properties": {
+                                        "query": {"type": "string", "example": "chống thấm nhà vệ sinh"},
+                                        "top_k": {"type": "integer", "default": 5, "example": 5}
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {"description": "Danh sách context từ vector DB"}
+                    },
+                    "tags": ["Admin"]
+                }
+            },
+            "/api/v1/health": {
+                "get": {
+                    "summary": "Health check",
+                    "operationId": "healthCheck",
+                    "responses": {
+                        "200": {
+                            "description": "Server đang chạy",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "status": {"type": "string", "example": "ok"},
+                                            "backend_ok": {"type": "boolean", "example": True},
+                                            "llm_ok": {"type": "boolean", "example": True}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "tags": ["System"]
+                }
+            }
+        },
+        "tags": [
+            {"name": "RAG Query", "description": "Endpoint chính để chat và đặt lịch"},
+            {"name": "Admin", "description": "Quản lý vector DB (nội bộ)"},
+            {"name": "System", "description": "Health check và monitoring"}
+        ]
+    }
+    return jsonify(spec)
+
+
+@app.route("/docs", methods=["GET"])
+def swagger_ui():
+    html = """<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fixago RAG — API Docs</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui.css">
+  <style>
+    body { margin: 0; background: #0f1115; }
+    .swagger-ui .topbar { background: linear-gradient(135deg, #ff6b00, #ff8a00); }
+    .swagger-ui .topbar .download-url-wrapper { display: none; }
+    .swagger-ui .info .title { color: #ff8a00; }
+  </style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-bundle.js"></script>
+  <script>
+    SwaggerUIBundle({
+      url: "/api/v1/openapi.json",
+      dom_id: "#swagger-ui",
+      deepLinking: true,
+      presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+      layout: "BaseLayout",
+      defaultModelsExpandDepth: -1,
+      tryItOutEnabled: true,
+      requestInterceptor: (req) => {
+        if (!req.body) return req;
+        try {
+          const body = JSON.parse(req.body);
+          if (!body.session_id) {
+            body.session_id = sessionStorage.getItem("swagger_session") || crypto.randomUUID();
+            sessionStorage.setItem("swagger_session", body.session_id);
+            req.body = JSON.stringify(body);
+          }
+        } catch(e) {}
+        return req;
+      }
+    });
+  </script>
+</body>
+</html>"""
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
 @app.route("/api/v1/rag/ingest", methods=["POST"])
 def ingest():
     data   = request.json or {}
