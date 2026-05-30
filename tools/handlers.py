@@ -457,9 +457,9 @@ def handle_get_services(search_arg: str, messages: List[Dict], used_tools: List[
 
         if not services:
             return (
-                f"Dạ hiện mình chưa thấy dịch vụ khớp với '{search_arg}' trong hệ thống. "
-                "Dạ giá của Fixago tùy theo hạng mục và tình trạng thực tế, thợ sẽ báo rõ trước khi làm. "
-                "Bạn muốn mình hỗ trợ đặt lịch không ạ?"
+                f"Dạ Fixago hiện chưa hỗ trợ dịch vụ '{search_arg}'. "
+                "Các dịch vụ hiện có gồm: Điện, Nước, Máy lạnh (điện lạnh), Xây dựng và Thạch cao. "
+                "Anh/chị cần hỗ trợ hạng mục nào trong số trên không ạ?"
             )
 
         summary = _build_price_summary(services)

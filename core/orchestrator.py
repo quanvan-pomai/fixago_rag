@@ -496,19 +496,36 @@ def _extract_category_from_groups(query: str) -> str:
         return _extract_category_fallback(query_lower)
 
 
+_NOT_SUPPORTED_VI = (
+    "Dạ Fixago hiện chưa hỗ trợ dịch vụ đó. "
+    "Các dịch vụ Fixago đang cung cấp gồm: "
+    "Điện, Nước, Máy lạnh (điện lạnh), Xây dựng và Thạch cao. "
+    "Anh/chị cần hỗ trợ hạng mục nào trong số trên không ạ?"
+)
+_NOT_SUPPORTED_EN = (
+    "Fixago doesn't support that service yet. "
+    "Available services: Electrical, Plumbing, Air Conditioning, "
+    "Construction, and Drywall. "
+    "Would you like help with any of these?"
+)
+
+
 def _extract_category_fallback(query_lower: str) -> str:
-    """Hardcoded keyword fallback when backend unavailable."""
+    """Hardcoded keyword fallback when backend unavailable.
+    Returns 'unknown' if no category can be determined — caller must handle this.
+    """
     if any(k in query_lower for k in ["điện", "ổ cắm", "công tắc", "aptomat", "chập", "mất", "dây điện", "bóng đèn", "đèn"]):
         return "điện"
     elif any(k in query_lower for k in ["nước", "ống", "rò", "tắc", "cống", "thoát", "bơm"]):
         return "nước"
     elif any(k in query_lower for k in ["máy lạnh", "điều hòa", "ac", "lạnh", "tủ lạnh"]):
         return "máy lạnh"
-    elif any(k in query_lower for k in ["xây dựng", "sơn", "tôn", "làm nhà", "build"]):
+    elif any(k in query_lower for k in ["xây dựng", "sơn", "tôn", "làm nhà", "build", "chống thấm", "thấm"]):
         return "xây dựng"
     elif any(k in query_lower for k in ["thạch cao", "trần", "drywall", "trần nhà"]):
         return "thạch cao"
-    return "all"
+    # No keyword matched — cannot determine category
+    return "unknown"
 
 
 def run_native_tool_path(query: str, history: list, messages: list, used_tools: list) -> str:
@@ -932,11 +949,15 @@ def run_native_tool_path(query: str, history: list, messages: list, used_tools: 
             raw_svc = tool_result.get("category") or tool_result.get("search", "")
             print(f"[DEBUG] get_services: raw_svc={raw_svc}", flush=True)
 
-            # FALLBACK: If model defaulted to "all", extract category from query using backend groups
-            original_raw_svc = raw_svc
-            if raw_svc == "all":
-                # Use backend service groups to find the best matching category
+            # If model defaulted to "all", extract category from query
+            if raw_svc in ("all", "", None):
                 raw_svc = _extract_category_from_groups(query)
+
+            # If still unknown after extraction — service not in our catalog
+            if raw_svc == "unknown":
+                from core.intent_router import detect_user_language
+                lang = detect_user_language(query)
+                return _NOT_SUPPORTED_EN if lang == "en" else _NOT_SUPPORTED_VI
 
             search = normalize_service_search(raw_svc)
             tool_str = f'CALL_TOOL: get_services(search="{search}")'
